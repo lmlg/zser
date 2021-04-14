@@ -1466,6 +1466,8 @@ for code, *ty in ((0x1073952, frozenset, proxy_set),
                   (0x81603094, tuple, proxy_list)):
   for typ in ty:
     _HASH_VALUES[typ] = code
+del code
+del ty
 
 cdef size_t _xhash (obj, size_t seed) except 0:
   cdef size_t ret
