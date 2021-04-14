@@ -21,7 +21,7 @@ Basic example
 Here's how 2 processes could share a chunk of data, and potentially modify it as
 well, in an atomic way:
 
-.. code::python
+.. code:: python
 
     data = { "abc": [1, 2, 3] }
     with open ("input", "wb") as f:
@@ -45,10 +45,10 @@ Installation
 
 Simply run:
 
-.. code::shell
+.. code:: shell
     python3 setup.py install
 
 And to run tests:
 
-.. code::shell
+.. code:: shell
     python3 setup.py test
