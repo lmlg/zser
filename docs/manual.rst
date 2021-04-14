@@ -94,34 +94,43 @@ Classes
       need of modifying the current object.
 
   .. py:method:: resize (extra)
+
     Increases the packer's capacity in *extra* bytes.
 
   .. py:method:: bump (nbytes)
+
     Bumps the packer's internal offset in *nbybtes* bytes.
 
   .. py:method:: putb (bx)
+
     Write the single byte *bx* into the packer's stream.
 
   .. py:method:: zpad (nbytes)
+
     Write *nbytes* zeroes into the packer's stream.
 
   .. py:method:: align_to (size)
+
     Ensures the packer's current position is aligned to *size* bytes.
 
-  .. py:method:: pack_struct (format, args...):
+  .. py:method:: pack_struct (format, args...)
+
     Same as writing *struct.pack_into* with the packer's stream and offset as the output.
 
   .. py:method:: bwrite (object)
+
     Writes *object* into the stream. The object may be another packer, in which case its
     byte stream will be written.
 
   .. py:method:: as_bytearray ()
+
     Returns a copy of the packer's byte stream.
 
   .. py:method:: pack (object, tag = True)
+
     Packs an object into the packer's stream. If *tag* is True, also emits the object's typecode.
 
-.. class:: proxy_handler (mapping, offset = 0, size = None, rw = False, hash_seed = 0, verify_str = False, import_key = None)
+.. py:class:: proxy_handler (mapping, offset = 0, size = None, rw = False, hash_seed = 0, verify_str = False, import_key = None)
 
    Returns an object that manages a mapping so that objects can be deserialized out of it. A proxy_handler
    is responsible for creating all the proxy objects out of mappings. Its constructor parameters are as following:
@@ -136,32 +145,44 @@ Classes
    - *hash_seed*, *import_key*: See the ``packer`` constructor for details.
    - *verify_str*: Whether to check for string's consistency when unpacking them.
 
-  .. py:method:: __len__ ()
+  .. py:method:: __len__ (self)
+
     Return the proxy_handler's mapping size.
 
-  .. py:method:: __getbuffer__, __releasebuffer__
+  .. py:method:: __getbuffer__ (self, buf, flags)
+
     Buffer interface implementation for proxy_handlers.
 
-  .. py:method:: unpack_struct (format, offset)
+  .. py:method:: __releasebuffer__ (self, buf)
+
+    Buffer interface implementation for proxy_handlers.
+
+  .. py:method:: unpack_struct (self, format, offset)
+
     Same as calling ``struct.unpack_from`` with the mapping and offset as inputs.
 
-  .. py:method:: struct_size (format)
+  .. py:function:: struct_size (format)
+
     Same as calling ``struct.calcsize`` with *format* as argument.
 
-  .. py:method:: __getitem__ (index)
+  .. py:method:: __getitem__ (self, index)
+
     Return the byte at position *index* for the underlying mapping.
 
-  .. py:method:: unpack ()
+  .. py:method:: unpack (self)
+
     Unpacks an object at the proxy_handler's current position and returns it.
 
-  .. py:method:: unpack_from (offset)
+  .. py:method:: unpack_from (self, offset)
+
     Unpacks an object at position *offset* and returns it.
 
-  .. py:method:: unpack_as (typecode, offset = None)
+  .. py:method:: unpack_as (self, typecode, offset = None)
+
     Unpacks an object of type *typecode*. If *offset* is not `None`, the unpacking is done at that position;
     otherwise it's unpacked at position *offset*. See below for the constants that may be used for the typecode.
 
-.. class:: proxy_list
+.. py:class:: proxy_list
 
   The indirect form of a builtin ``list``, constructed by a ``proxy_handler`` out of a mapping.
   Instances of this class behave like a regular list, with the following exceptions:
@@ -172,30 +193,32 @@ Classes
     following interfaces are not available: `append`, `clear`, `extend`, `insert`, `pop`, `remove`, `reverse`, `sort`
   - A proxy_list implements 2 methods not present in regular lists, specified below:
 
-  .. py:method:: atomic_cas (index, expected, new)
+  .. py:method:: atomic_cas (self, index, expected, new)
+
     Atomically compares the value of the list at position *index*, and if it's equal to *expected*,
     sets it to *new*. This method only works when the proxy_list holds primitive elements.
     Returns *True* if the operation succeeded; *False* otherwise.
 
-  .. py:method:: atomic_add (index, value)
+  .. py:method:: atomic_add (self, index, value)
+
     Atomically adds *value* to the element in the proxy_list at position *index*. This method
     only works when the proxy_list holds primitive elements. Returns the previous element at
     the specified position.
 
-.. class:: proxy_str
+.. py:class:: proxy_str
 
-  Indirect form of a builtin ``str``. Implements the same interface.
+    Indirect form of a builtin ``str``. Implements the same interface.
 
-.. class:: proxy_set
+.. py:class:: proxy_set
 
-  Indirect form of a builtin ``frozenset``. Implements the same interface.
+    Indirect form of a builtin ``frozenset``. Implements the same interface.
 
-.. class:: proxy_dict
+.. py:class:: proxy_dict
 
-  Indirect form of a builtin ``dict``. Instances of this class are always immutable, which
-  means that the following interfaces are not available: `clear`, `pop`, `popitem`, `setdefault`,
-  `update`. In addition, since a proxy_dict is only built from a proxy_handler, the class method
-  `fromkeys` is not implemented.
+    Indirect form of a builtin ``dict``. Instances of this class are always immutable, which
+    means that the following interfaces are not available: `clear`, `pop`, `popitem`, `setdefault`,
+    `update`. In addition, since a proxy_dict is only built from a proxy_handler, the class method
+    `fromkeys` is not implemented.
 
 Custom objects
 --------------
@@ -211,6 +234,7 @@ and have the same properties of the original object, with the following caveats:
     `add` that can be used to *atomically* modify their values. They can be used as such:
 
   .. code-block:: python
+
     x = myclass (value = 1)   # Create object with slot named 'value'
     proxy = zser.unpack_from (zser.pack (x), rw = True)
     type(proxy).value.add (-1)   # Atomically adds -1 to proxy's value
@@ -220,52 +244,60 @@ Module functions
 ----------------
 
 .. py:function:: xhash (obj, seed = 0)
-  Compute the hash code for object ``obj``, using ``seed`` as the starting value.
-  The return value is stable across different processes, and is unaffected by
-  environment variables and any other external parameters. Supported types are
-  the following: `int`, `float`, `str`, `frozenset`, `tuple` and all proxies.
+
+    Compute the hash code for object ``obj``, using ``seed`` as the starting value.
+    The return value is stable across different processes, and is unaffected by
+    environment variables and any other external parameters. Supported types are
+    the following: `int`, `float`, `str`, `frozenset`, `tuple` and all proxies.
 
 .. py:decorator:: register_pack (type)
-  Registers a packing routine for the specified type. Once registered, if a ``packer``
-  encounters an object of this type, the function will be called with the packer
-  as its first argument, and the object as the second one.
+
+    Registers a packing routine for the specified type. Once registered, if a ``packer``
+    encounters an object of this type, the function will be called with the packer
+    as its first argument, and the object as the second one.
 
 .. py:decorator:: register_unpack (type)
-  Same as above, only the callback is invoked when unpacking. Also, the callback
-  for unpacking receives 3 arguments: The type of the object that should be unpacked,
-  the ``proxy_handler``, and the offset at which the unpacking takes place.
+
+    Same as above, only the callback is invoked when unpacking. Also, the callback
+    for unpacking receives 3 arguments: The type of the object that should be unpacked,
+    the ``proxy_handler``, and the offset at which the unpacking takes place.
 
 .. py:function:: pack (obj, \**kwargs)
-  Returns the binary representation of the object as a bytearray. Equivalent to
-  creating a ``packer`` with the passed keyword arguments, calling ``pack`` with
-  the passed object and then returning the value of calling ``as_bytearray``.
+
+    Returns the binary representation of the object as a bytearray. Equivalent to
+    creating a ``packer`` with the passed keyword arguments, calling ``pack`` with
+    the passed object and then returning the value of calling ``as_bytearray``.
 
 .. py:function:: pack_into (obj, place, offset = None, \**kwargs)
-  Packs an object at a specific offset in the destination. The parameter ``place``
-  can be a bytearray, in which case the object will be written at the specified
-  offset (or concatenated, if *offset* is None). Otherwise, ``place`` must
-  implement a method, ``write``, which will be called with the packed object,
-  and ``seek``, if the offset is not None, in order to write the object at the
-  specified offset (i.e: Like a file does).
-  Returns the number of writes written.
+
+    Packs an object at a specific offset in the destination. The parameter ``place``
+    can be a bytearray, in which case the object will be written at the specified
+    offset (or concatenated, if *offset* is None). Otherwise, ``place`` must
+    implement a method, ``write``, which will be called with the packed object,
+    and ``seek``, if the offset is not None, in order to write the object at the
+    specified offset (i.e: Like a file does).
+    Returns the number of writes written.
 
 .. py:function:: unpack_from (place, offset = 0, \**kwargs)
-  Unpacks an object from the specified input and from an offset.
-  The keyword arguments are used to construct a ``proxy_handler``. See its documentation
-  for a description of its parameters.
+
+    Unpacks an object from the specified input and from an offset.
+    The keyword arguments are used to construct a ``proxy_handler``. See its documentation
+    for a description of its parameters.
 
 .. py:function:: unpack_as (place, code, offset = 0, \**kwargs)
-  Unpacks an object from the specified input, and with the specified typecode and offset.
-  The typecode can be one of the following module constants:
-    - TYPE_INT: Signed integer
-    - TYPE_UINT: Unsigned integer
-    - TYPE_FLOAT: Floating point value
-    - TYPE_BIGINT: Arbitrary precision number
-    - TYPE_NONE, TYPE_TRUE, TYPE_FALSE: The constants *None*, *True*, *False*
-    - TYPE_BACKREF: A reference to an object that was previously serialized
-    - TYPE_STR, TYPE_BYTES, TYPE_BYTEARRAY, TYPE_LIST, TYPE_TUPLE, TYPE_SET, TYPE_DICT: Self-explanatory
-    - TYPE_OBJECT: Any object of a type not specified
+
+    Unpacks an object from the specified input, and with the specified typecode and offset.
+    The typecode can be one of the following module constants:
+        - TYPE_INT: Signed integer
+        - TYPE_UINT: Unsigned integer
+        - TYPE_FLOAT: Floating point value
+        - TYPE_BIGINT: Arbitrary precision number
+        - TYPE_NONE, TYPE_TRUE, TYPE_FALSE: The constants *None*, *True*, *False*
+        - TYPE_BACKREF: A reference to an object that was previously serialized
+        - TYPE_STR, TYPE_BYTES, TYPE_BYTEARRAY, TYPE_LIST, TYPE_TUPLE, TYPE_SET, TYPE_DICT: Self-explanatory
+        - TYPE_OBJECT: Any object of a type not specified
 
 .. py:function:: unproxy (obj)
-  Converts a proxy object (proxy_list, proxy_str, proxy_set, proxy_dict) into its 'regular'
-  counterpart, recursively.
+
+    Converts a proxy object (proxy_list, proxy_str, proxy_set, proxy_dict) into its 'regular'
+    counterpart, recursively.
