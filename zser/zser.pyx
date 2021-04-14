@@ -2235,6 +2235,7 @@ cdef class proxy_dict:
   cdef _todict (self):
     cdef dict_iter_fn kget, vget
     cdef proxy_list indices
+    cdef void *ptr
 
     rv = {}
     unproxy_ = unproxy
@@ -2246,9 +2247,10 @@ cdef class proxy_dict:
       vget = <dict_iter_fn>_proxy_dict_iter_val["const array_3Q*"]
 
     indices = self.indices
+    ptr = indices.proxy.base + indices.offset
     for i in range (indices.size):
-      key = kget (indices.proxy.base + indices.offset, i, indices)
-      val = vget (indices.proxy.base + indices.offset, i, indices)
+      key = kget (ptr, i, indices)
+      val = vget (ptr, i, indices)
       rv[unproxy_ (key)] = unproxy_ (val)
 
     return rv
