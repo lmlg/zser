@@ -23,22 +23,22 @@ well, in an atomic way:
 
 .. code::python
 
-  data = { "abc": [1, 2, 3] }
-  with open ("input", "wb") as f:
-    zser.pack_into (data, f)
+    data = { "abc": [1, 2, 3] }
+    with open ("input", "wb") as f:
+        zser.pack_into (data, f)
 
-  # At this point any number of processes can map the file above
-  with open ("input", "r+b") as f:
-    data = zser.unpack_from (f)   # Unpacked in O(1) time.
+    # At this point any number of processes can map the file above
+    with open ("input", "r+b") as f:
+        data = zser.unpack_from (f)   # Unpacked in O(1) time.
 
-  lst = data["abc"]
-  # The above returns a 'proxy_list' instead of a python list
-  # It consumes a fixed amount of memory, independent of the number
-  # of elements. It implements mostly the same interface, with some
-  # additions to make it easy to share and modify across processes:
-  lst.atomic_cas (1, 2, -2)
-  lst.atomic_add (1, 40)
-  lst[1]   # 38
+    lst = data["abc"]
+    # The above returns a 'proxy_list' instead of a python list
+    # It consumes a fixed amount of memory, independent of the number
+    # of elements. It implements mostly the same interface, with some
+    # additions to make it easy to share and modify across processes:
+    lst.atomic_cas (1, 2, -2)
+    lst.atomic_add (1, 40)
+    lst[1]   # 38
 
 Installation
 ------------
@@ -46,9 +46,9 @@ Installation
 Simply run:
 
 .. code::shell
-  python3 setup.py install
+    python3 setup.py install
 
 And to run tests:
 
 .. code::shell
-  python3 setup.py test
+    python3 setup.py test
