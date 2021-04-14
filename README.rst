@@ -46,9 +46,11 @@ Installation
 Simply run:
 
 .. code:: shell
+
     python3 setup.py install
 
 And to run tests:
 
 .. code:: shell
+
     python3 setup.py test
