@@ -372,6 +372,8 @@ cdef _pack_set (packer xm, value, tag):
   xm.pack_struct (base_fmt, code, tplen)
   xm.align_to (sizeof (long long) if wide else sizeof (int))
   xm.pack_struct (str (tplen) + chr (code[0]), *offcodes)
+  if not wide:
+    xm.align_to (sizeof (long long))
   xm.bwrite (m2)
 
 cdef _pack_dict (packer xm, value, tag):
@@ -1516,12 +1518,12 @@ def xhash (obj, seed = 0):
 
 #######################################
 
-cdef inline double _double_diff (double x, double y):
+cdef inline Py_ssize_t _double_diff (double x, double y):
   cdef double ret
 
   ret = x - y
   if not isnan (ret):
-    return ret
+    return -1 if ret < 0 else ret != 0
 
   # The result can be NaN if:
   # One of the arguments is NaN
@@ -1544,6 +1546,7 @@ cdef inline double _double_diff (double x, double y):
 cdef int _cnum_find_sorted (const unsigned char *ptr, size_t n, obj,
                             cnum value, cnum tmp):
   cdef size_t i, step
+  cdef Py_ssize_t cmpr
 
   try:
     value = obj
@@ -1555,27 +1558,27 @@ cdef int _cnum_find_sorted (const unsigned char *ptr, size_t n, obj,
     step = (i + n) >> 1
     tmp = (<const cnum *>ptr)[step]
     if cnum is double:
-      tmp = _double_diff (tmp, value)
+      cmpr = _double_diff (tmp, value)
     else:
-      tmp -= value
+      cmpr = <Py_ssize_t> (tmp - value)
 
-    if tmp == 0:
+    if cmpr == 0:
       return 1
-    elif tmp > 0:
+    elif cmpr > 0:
       n = step - 1
       step = min (step >> 2, <size_t>64)
       while step > 0:
         tmp = (<const cnum *>ptr)[n]
         if cnum is double:
-          tmp = _double_diff (tmp, value)
+          cmpr = _double_diff (tmp, value)
         else:
-          tmp -= value
+          cmpr = <Py_ssize_t> (tmp - value)
 
-        if tmp > 0:
+        if cmpr > 0:
           step -= 1
           n -= 1
         else:
-          return tmp == 0
+          return cmpr == 0
       n += 1
     else:
       i = step + 1
@@ -1583,15 +1586,15 @@ cdef int _cnum_find_sorted (const unsigned char *ptr, size_t n, obj,
       while step > 0:
         tmp = (<const cnum *>ptr)[i]
         if cnum is double:
-          tmp = _double_diff (tmp, value)
+          cmpr = _double_diff (tmp, value)
         else:
-          tmp -= value
+          cmpr = <Py_ssize_t> (tmp - value)
 
-        if tmp < 0:
+        if cmpr < 0:
           step -= 1
           i += 1
         else:
-          return tmp == 0
+          return cmpr == 0
 
   return 0
 
