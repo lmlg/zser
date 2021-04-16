@@ -603,11 +603,9 @@ cdef class packer:
 
   cpdef putb (self, bx):
     "Write a single byte to the stream."
-    cdef char byte
 
-    byte = bx
     self.resize (1)
-    self.wbytes[self.wlen] = byte
+    self.wbytes[self.wlen] = <unsigned char>bx
     self.bump (1)
 
   cpdef zpad (self, size_t size):
@@ -620,6 +618,8 @@ cdef class packer:
     self.zpad (_get_padding (self.offset, size))
 
   cdef _pack_struct (self, fmt, tuple args):
+    cdef size_t size
+
     size = S_calcsize (fmt)
     self.resize (size)
     S_pack_into (fmt, self.wbytes, self.wlen, *args)
@@ -1139,9 +1139,7 @@ cdef class proxy_list:
     return typ (IT_chain (self, x))
 
   def copy (self):
-    if self.mutable:
-      return self._unproxy ()
-    return self
+    return list (self) if self.mutable else self
 
   def index (self, value, start = 0, stop = WORD_MAX):
     cdef size_t istart, istop, n
