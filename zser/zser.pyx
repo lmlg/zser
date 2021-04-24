@@ -601,11 +601,11 @@ cdef class packer:
     self.wlen += off
     self.offset += off
 
-  cpdef putb (self, bx):
+  cpdef putb (self, unsigned char bx):
     "Write a single byte to the stream."
 
     self.resize (1)
-    self.wbytes[self.wlen] = <unsigned char>bx
+    self.wbytes[self.wlen] = bx
     self.bump (1)
 
   cpdef zpad (self, size_t size):
@@ -617,6 +617,7 @@ cdef class packer:
     "Pad the stream so that the current position is aligned to ``size`` bytes."
     self.zpad (_get_padding (self.offset, size))
 
+  @cy.final
   cdef _pack_struct (self, fmt, tuple args):
     cdef size_t size
 
