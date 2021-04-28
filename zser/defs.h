@@ -55,6 +55,22 @@ STR_FINI (PyObject *obj)
   p->_base._base.wstr = NULL;
 }
 
+static int
+TYPE_PATCH (PyTypeObject *tp, binaryfunc add, binaryfunc mod, binaryfunc mul)
+{
+  if (!tp)
+    return (-1);
+
+  PyNumberMethods *num = tp->tp_as_number;
+  if (!num)
+    return (-1);
+
+  num->nb_add = add;
+  num->nb_remainder = mod;
+  num->nb_multiply = mul;
+  return (0);
+}
+
 /* Atomic definitions. */
 
 #ifdef __GNUC__

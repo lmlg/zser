@@ -206,6 +206,12 @@ def test_plist_api ():
   with pytest.raises (TypeError):
     q[0] = -1
 
+  # Test argument order
+  q = zser.unpack_from (zser.pack ([1, 2]), rw = True)
+  assert [-1, 0] + q == [-1, 0, 1, 2]
+  q = zser.unpack_from (zser.pack ((1, 2)), rw = True)
+  assert (-1, 0) + q == (-1, 0, 1, 2)
+
 # Proxy string API
 
 def test_pstr_api ():
@@ -257,6 +263,12 @@ def test_pstr_api ():
   assert (s % -1) == (q % -1)
   assert (s * 3) == (q * 3)
 
+  # Test argument order for operators.
+  assert (s + s) > q
+  assert s <= q
+  assert q + s == s + q
+  assert 2 * q == s + s
+
 # Proxy set API
 
 def _tst_pset_sorted (mul):
@@ -277,6 +289,14 @@ def _tst_pset_sorted (mul):
   assert q2 <= q1
   assert q1 > q2
   assert q1 >= q2
+
+  # Test argument order
+  assert (q1 | s2) == (s1 | q2)
+  assert (s2 | q1) == (q2 | s1)
+  assert (q1 & s2) == (s1 & q2)
+  assert (s2 & q1) == (q2 & s1)
+  assert (q1 ^ s2) == (s1 ^ q2)
+  assert (s2 ^ q1) == (q2 ^ s1)
 
 def test_pset_api ():
   _tst_pset_sorted (1)

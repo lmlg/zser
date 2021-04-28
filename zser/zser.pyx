@@ -1134,7 +1134,10 @@ cdef class proxy_list:
     else:
       rdwr = (<proxy_list>x).mutable
       typ = list if rdwr else tuple
-      if rdwr != (<proxy_list>self).mutable:
+      if ((isinstance (self, proxy_list) and
+          rdwr != (<proxy_list>self).mutable) or
+            (not isinstance (self, proxy_list) and
+              not isinstance (self, typ))):
         raise TypeError ("cannot add proxy lists of different mutability")
 
     return typ (IT_chain (self, x))
@@ -1344,39 +1347,16 @@ cdef class proxy_str:
                        (<char *>PyUnicode_DATA (self.uobj)) + start)
     return rv
 
-  @staticmethod
-  cdef str _operator_impl (self, x, typ, bint self_type, fn):
-    cdef proxy_str this
-
-    # For standard operators (i.e: 'str.__add__'), we can use the raw unicode
-    # object, since we know there's no danger there. Otherwise, for custom
-    # types, we have to copy into a fresh object.
-    this = None
-    if isinstance (self, proxy_str):
-      if isinstance (x, typ):
-        this = self
-        ret = fn (this.uobj, x)
-      elif self_type and isinstance (self, proxy_str):
-        this = self
-        ret = fn (this.uobj, (<proxy_str>x).uobj)
-      else:
-        ret = fn (str (self), x)
-    elif isinstance (self, typ):
-      this = x
-      ret = fn (self, this.uobj)
-    else:
-      ret = fn (self, str (x))
-
-    return ret if this is None or ret is not this.uobj else this
-
+  # These arithmetic operators are placeholders until we can install
+  # the real implementations once the 'proxy_str' type is finalized.
   def __add__ (self, x):
-    return proxy_str._operator_impl (self, x, str, True, OP_add)
+    return self
 
   def __mod__ (self, x):
-    return proxy_str._operator_impl (self, x, str, False, OP_mod)
+    return self
 
   def __mul__ (self, x):
-    return proxy_str._operator_impl (self, x, int, False, OP_mul)
+    return self
 
   def __contains__ (self, x):
     return x in self.uobj
@@ -1430,6 +1410,46 @@ cdef class proxy_str:
   def __ne__ (self, x):
     return proxy_str._cmp_impl (self, x, OP_ne)
 
+# The following is a kludge to support arbitrary argument order in
+# arithmetic operators. We need to patch things this way because not
+# all Cython versions can be convinced.
+
+cdef str _proxy_str_op_impl (self_, x, typ, bint self_type, fn):
+  cdef proxy_str this
+
+  # For standard operators (i.e: 'str.__add__'), we can use the raw unicode
+  # object, since we know there's no danger there. Otherwise, for custom
+  # types, we have to copy into a fresh object.
+  this = None
+  if isinstance (self_, proxy_str):
+    if isinstance (x, typ):
+      this = self_
+      ret = fn (this.uobj, x)
+    elif self_type and isinstance (x, proxy_str):
+      this = self_
+      ret = fn (this.uobj, (<proxy_str>x).uobj)
+    else:
+      ret = fn (str (self_), x)
+  elif isinstance (self_, typ):
+    this = x
+    ret = fn (self_, this.uobj)
+  else:
+    ret = fn (self_, str (x))
+
+  return ret if this is None or ret is not this.uobj else this
+
+cdef _proxy_str_add (x, y):
+  return _proxy_str_op_impl (x, y, str, True, OP_add)
+
+cdef _proxy_str_mod (x, y):
+  return _proxy_str_op_impl (x, y, str, False, OP_mod)
+
+cdef _proxy_str_mul (x, y):
+  return _proxy_str_op_impl (x, y, int, False, OP_mul)
+
+# Install the new operators.
+TYPE_PATCH (<PyTypeObject *>proxy_str, _proxy_str_add,
+            _proxy_str_mod, _proxy_str_mul)
 
 cdef inline size_t _rotate_hash (size_t code, size_t nbits):
   return (code << nbits) | (code >> (sizeof (size_t) * 8 - nbits))
@@ -1984,7 +2004,7 @@ cdef class proxy_set:
       return set(this).intersection (x)
     elif not isinstance (self, (set, frozenset)):
       raise TypeError ("cannot compute intersection between %r and %r" %
-                        (type(self).__name__, type(x).__name__))
+                       (type(self).__name__, type(x).__name__))
     return self.intersection (set (x))
 
   def __or__ (self, x):
@@ -1997,7 +2017,7 @@ cdef class proxy_set:
       return set(this).union (x)
     elif not isinstance (self, (set, frozenset)):
       raise TypeError ("cannot compute union between %r and %r" %
-                        (type(self).__name__, type(x).__name__))
+                       (type(self).__name__, type(x).__name__))
     return self.union (set (x))
 
   def __sub__ (self, x):
@@ -2010,7 +2030,7 @@ cdef class proxy_set:
       return set(this).difference (x)
     elif not isinstance (self, (set, frozenset)):
       raise TypeError ("cannot compute difference between %r and %r" %
-                        (type(self).__name__, type(x).__name__))
+                       (type(self).__name__, type(x).__name__))
     return self.difference (set (x))
 
   def __xor__ (self, x):
@@ -2023,7 +2043,7 @@ cdef class proxy_set:
       return set(this).symmetric_difference (x)
     elif not isinstance (self, (set, frozenset)):
       raise TypeError ("cannot compute symmetric difference between %r and %r" %
-                        (type(self).__name__, type(x).__name__))
+                       (type(self).__name__, type(x).__name__))
     return self.symmetric_difference (set (x))
 
   cdef bint _eq (self, x):
@@ -2605,7 +2625,8 @@ def pack_into (obj, place, offset = None, **kwargs):
       if seek is _SENTINEL:
         raise ValueError (
           "don't know how to pack into object of type %r at a specific offset" %
-          type (place))
+          type(place).__name__
+        )
 
       prev = seek (0, 1)
       seek (offset, 0)
@@ -2626,7 +2647,7 @@ def pack_into (obj, place, offset = None, **kwargs):
     return len (b)
   else:
     raise TypeError ("don't know how to pack into object of type %r" %
-                     type (place))
+                     type(place).__name__)
 
 def unpack_from (place, offset = 0, **kwargs):
   """

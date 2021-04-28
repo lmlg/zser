@@ -1,5 +1,6 @@
 from cpython.buffer cimport PyObject_GetBuffer, PyBuffer_Release
 from cpython.bytearray cimport PyByteArray_Resize
+from cpython.object cimport PyTypeObject, binaryfunc
 from cpython.slice cimport PySlice_GetIndices
 from libc.math cimport modf, isnan, isinf
 from libc.string cimport memcpy, memcmp
@@ -19,6 +20,9 @@ cdef extern from "defs.h":
   cdef unsigned int STR_KIND (object)
   cdef object STR_NEW (unsigned int, size_t, const void *)
   cdef void STR_FINI (object)
+
+  cdef int TYPE_PATCH (PyTypeObject *, binaryfunc,
+                       binaryfunc, binaryfunc) except -1
 
   cdef void atomic_fence ()
   cdef int atomic_cas_i (void *, Py_ssize_t, Py_ssize_t)
