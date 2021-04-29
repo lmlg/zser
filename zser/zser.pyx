@@ -866,7 +866,6 @@ cdef class proxy_handler:
   @cy.final
   cdef object _unpack (self, size_t offs):
     self._assert_len (offs)
-    code = <unsigned char> (self.base[offs])
     return self._unpack_with_code (offs + 1, <unsigned char> (self.base[offs]))
 
   cpdef unpack (self):
