@@ -79,64 +79,64 @@ class packer (offset = 0, id_cache = None, hash_seed = 0,
                 arbitrary code, this key can be used to prevent against malicious input.
 
   ```python
-  copy ()
+    copy ()
   ```
 
   Returns a new packer that is a copy of the caller. Can be used to serialize complex
   objects without the need of modifying the current object.
 
   ```python
-  resize (extra)
+    resize (extra)
   ```
 
   Increases the packer's capacity in _extra_ bytes.
 
   ```python
-  bump (nbytes)
+    bump (nbytes)
   ```
 
   Bumps the packer's internal offset in _nbytes_ bytes.
 
   ```python
-  putb (bx)
+    putb (bx)
   ```
 
   Writes the single byte _bx_ into the packer's stream.
 
   ```python
-  zpad (nbytes)
+    zpad (nbytes)
   ```
 
   Write _nbytes_ zeroes into the packer's stream.
 
   ```python
-  align_to (size)
+    align_to (size)
   ```
 
   Ensures the packer's current position is aligned to _size_ bytes by padding
   with zeroes, if needed.
 
   ```python
-  pack_struct (format, *args)
+    pack_struct (format, *args)
   ```
 
   Same as calling *struct.pack_into* with the packer's stream and offset as output.
 
   ```python
-  bwrite (obj)
+    bwrite (obj)
   ```
 
   Writes _obj_ into the stream. The argument may be another packer, in which case its
   byte stream will be written.
 
   ```python
-  as_bytearray ()
+    as_bytearray ()
   ```
 
   Returns a copy of the packer's byte stream.
 
   ```python
-  pack (obj, tag = True)
+    pack (obj, tag = True)
   ```
 
   Packs an object into the packer's stream. If _tag_ is true, also emits the typecode.
@@ -164,48 +164,48 @@ class proxy_handler (mapping, offset = 0, size = None, rw = False,
   * verify_str: Whether to check for strings' consistency when unpacking them.
   
   ```python
-  __len__ ()
+    __len__ ()
   ```
 
   Returns the proxy_handler's mapping size.
 
   ```python
-  __getbuffer__ (buf, flags)
-  __releasebuffer__ (buf)
+    __getbuffer__ (buf, flags)
+    __releasebuffer__ (buf)
   ```
 
   Buffer interface implementation for proxy_handlers.
 
   ```python
-  unpack_struct (format, offset)
+    unpack_struct (format, offset)
   ```
 
   Same as calling *struct.unpack_from* with the mapping and offset as inputs.
 
   ```python
-  struct_size (format)
+    struct_size (format)
   ```
 
   Same as calling *struct.calcsize* with _format_ as argument.
 
   ```python
-  __getitem__ (index)
+    __getitem__ (index)
   ```
 
   Returns the byte at position _index_ for the mapping.
 
   ```python
-  unpack ()
+    unpack ()
   ```
 
   Unpacks an object at the proxy_handler's current position and returns it.
 
   ```python
-  unpack_from (offset)
+    unpack_from (offset)
   ```
 
   ```python
-  unpack_as (typecode, offset = None)
+    unpack_as (typecode, offset = None)
   ```
 
   Unpacks an object of type _typecode_. If _offset_ is not _None_, the unpacking is done
@@ -228,7 +228,7 @@ class proxy_list
   * A proxy_list implements 2 methods not present in regular lists, specified below:
 
   ```python
-  atomic_cas (index, expected, new)
+    atomic_cas (index, expected, new)
   ```
 
   Atomically compares the value of the list at position _index_, and if it's identical to
@@ -236,7 +236,7 @@ class proxy_list
   _True_ if the operation succeeded; _False_ otherwise.
 
   ```python
-  atomic_add (index, value)
+    atomic_add (index, value)
   ```
 
   Atomically adds _value_ to the element in the proxy_list at position _index_. This
