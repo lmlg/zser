@@ -85,7 +85,7 @@ static int
 atomic_cas_i (void *ptr, Py_ssize_t exp, Py_ssize_t nval)
 {
   return (__atomic_compare_exchange_n ((Py_ssize_t *)ptr, &exp, nval,
-    1, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED));
+    0, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED));
 }
 
 static Py_ssize_t

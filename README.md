@@ -24,7 +24,7 @@ well, in an atomic way:
 
     # At this point any number of processes can map the file above
     with open ("input", "r+b") as f:
-        data = zser.unpack_from (f)   # Unpacked in O(1) time.
+        data = zser.unpack_from (f, rw = True)   # Unpacked in O(1) time.
 
     lst = data["abc"]
     # The above returns a 'proxy_list' instead of a python list

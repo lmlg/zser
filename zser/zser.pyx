@@ -692,7 +692,7 @@ cdef class packer:
         _pack_generic (self, obj, tag)
 
       return self.offset - prev
-    except Exception:
+    except:
       self.id_cache.pop (obj_id, None)
       raise
 
