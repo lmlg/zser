@@ -6,9 +6,19 @@ from libc.math cimport modf, isnan, isinf
 from libc.string cimport memcpy, memcmp
 
 cdef extern from "defs.h":
-  cdef const Py_ssize_t IWORD_MIN
-  cdef const Py_ssize_t IWORD_MAX
+  cdef const Py_ssize_t INT8_MIN
+  cdef const Py_ssize_t INT8_MAX
+  cdef const Py_ssize_t INT16_MIN
+  cdef const Py_ssize_t INT16_MAX
+  cdef const Py_ssize_t INT32_MIN
+  cdef const Py_ssize_t INT32_MAX
+  cdef const long long INT64_MIN
+  cdef const long long INT64_MAX
   cdef const size_t WORD_MAX
+  cdef const float FLOAT32_MIN
+  cdef const float FLOAT32_MAX
+  cdef const double FLOAT64_MIN
+  cdef const double FLOAT64_MAX
 
   # These are actually provided by CPython, but aren't exported in
   # some cython versions, so we declare them here.
@@ -25,16 +35,17 @@ cdef extern from "defs.h":
                        binaryfunc, binaryfunc) except -1
 
   cdef void atomic_fence ()
-  cdef int atomic_cas_i (void *, Py_ssize_t, Py_ssize_t)
-  cdef Py_ssize_t atomic_add_i (void *, Py_ssize_t)
-  cdef int atomic_cas_I (void *, size_t, size_t)
-  cdef size_t atomic_add_I (void *, size_t)
-  cdef int _atomic_cas_f (void *, double, double)
+  cdef bint atomic_is_lock_free (void *, size_t)
+  cdef bint atomic_cas_bool (void *, void *, void *)
+  cdef void atomic_add (void *, void *)
 
 ctypedef enum tpcode:
-  INT,
-  UINT,
-  FLOAT,
+  INT8,
+  INT16,
+  INT32,
+  INT64,
+  FLOAT32,
+  FLOAT64,
   NUM,
   STR,
   BYTES,

@@ -27,9 +27,7 @@ cdef object OP_ne = operator.ne
 
 cdef object IT_chain = chain
 cdef str SYS_endian = byteorder
-cdef bint Little_Endian_p = SYS_endian == "little"
 cdef object Int_From_Bytes = int.from_bytes
-cdef object Bytes_Cls = (bytes, bytearray)
 
 cdef str _WORD_FMT
 cdef str _IWORD_FMT
@@ -47,15 +45,36 @@ cdef object Import_Module = import_module
 
 cdef dict _custom_packers = {}
 cdef object _custom_packers_lock = Lock ()
-cdef unsigned int _MAX_DISTANCE = 100
 
 cdef object HMAC = hmac.HMAC
 cdef object _HASH_METHOD = hashlib.sha256
 
+# Useful constants.
+DEF _OFF_SHIFT = 5
+DEF _CODE_MASK = 0x1f
+DEF _WIDE_LIMIT = 0x4000000
+
+# These must be kept in sync with the typecodes.
+cdef tuple _BASIC_FMTS = ("b", "h", "i", "l", "f", "d")
+cdef size_t[6] _BASIC_SIZES = [sizeof (char), sizeof (short),
+                               sizeof (int), sizeof (long long),
+                               sizeof (float), sizeof (double)]
+
 # Basic types that may be stored inline in lists, sets, dicts and descriptors.
 ctypedef fused cnum:
-  Py_ssize_t
-  size_t
+  char
+  unsigned char
+  short
+  unsigned short
+  int
+  unsigned int
+  long long
+  unsigned long long
+  float
+  double
+
+ctypedef fused cfloat:
+  float
   double
 
 # Integer array types used for hash indexes. They come in variants of
@@ -64,22 +83,16 @@ ctypedef fused cnum:
 # dictionaries (store both key and value offsets).
 
 cdef struct array_2I:
-  unsigned int hval
-  unsigned int key_off
+  unsigned int values[2]
 
 cdef struct array_2Q:
-  unsigned long long hval
-  unsigned long long key_off
+  unsigned unsigned long long values[2]
 
 cdef struct array_3I:
-  unsigned int hval
-  unsigned int key_off
-  unsigned int val_off
+  unsigned int values[3]
 
 cdef struct array_3Q:
-  unsigned long long hval
-  unsigned long long key_off
-  unsigned long long val_off
+  unsigned long long values[3]
 
 hidx_type = cy.fused_type ("const array_2I*", "const array_2Q*",
                            "const array_3I*", "const array_3Q*")
@@ -92,10 +105,13 @@ cdef union fn_caster:
 # Special object used for detecting misses in dict lookups.
 cdef object _SENTINEL = object ()
 
+cdef inline bint _is_inline_code (unsigned int code) noexcept:
+  return code <= tpcode.FLOAT64
+
 cdef inline size_t _get_padding (size_t off, size_t size):
   return ((off + size) & ~(size - 1)) - off
 
-cdef _pack_cnum (packer xm, int code, cnum value, bint tag):
+cdef _pack_cnum (Packer xm, int code, cnum value, bint tag):
   cdef size_t offset, extra, rv
   cdef char *ptr
 
@@ -113,13 +129,15 @@ cdef _pack_cnum (packer xm, int code, cnum value, bint tag):
   (<cnum *> (ptr + extra))[0] = value
   xm.bump (rv)
 
-def _pack_int (packer xm, value, tag):
-  if IWORD_MIN <= value <= IWORD_MAX:
-    # Signed integer.
-    _pack_cnum[Py_ssize_t] (xm, tpcode.INT, value, tag)
-  elif 0 <= value <= WORD_MAX:
-    # Unsigned integer.
-    _pack_cnum[size_t] (xm, tpcode.UINT, value, tag)
+def _pack_int (Packer xm, value, tag):
+  if INT8_MIN <= value <= INT8_MAX:
+    _pack_cnum[char] (xm, tpcode.INT8, value, tag)
+  elif INT16_MIN <= value <= INT16_MAX:
+    _pack_cnum[short] (xm, tpcode.INT16, value, tag)
+  elif INT32_MIN <= value <= INT32_MAX:
+    _pack_cnum[int] (xm, tpcode.INT32, value, tag)
+  elif INT64_MIN <= value <= INT64_MAX:
+    _pack_cnum[cy.longlong] (xm, tpcode.INT64, value, tag)
   else:
     # Bigint.
     bitlen = value.bit_length ()
@@ -130,8 +148,20 @@ def _pack_int (packer xm, value, tag):
     blen = len (brepr)
     xm.pack_struct ("=I" + str (blen) + "s", blen, brepr)
 
-def _pack_float (packer xm, value, tag):
-  _pack_cnum[double] (xm, tpcode.FLOAT, value, tag)
+cdef int _float_code (obj):
+  cdef double dbl
+
+  if FLOAT32_MIN <= obj <= FLOAT32_MAX:
+    dbl = obj
+    if <float>dbl == dbl:
+      return tpcode.FLOAT32
+  return tpcode.FLOAT64
+
+def _pack_float (Packer xm, value, tag):
+  if _float_code (value) == tpcode.FLOAT32:
+    _pack_cnum[float] (xm, tpcode.FLOAT32, value, tag)
+  else:
+    _pack_cnum[double] (xm, tpcode.FLOAT64, value, tag)
 
 cpdef _write_size (buf, size_t offs, size_t sz):
   cdef char *ptr
@@ -145,7 +175,7 @@ cpdef _write_size (buf, size_t offs, size_t sz):
     ptr[offs] = <unsigned char> (sz)
     return 1
 
-def _pack_str (packer xm, str value, tag):
+def _pack_str (Packer xm, str value, tag):
   cdef char *ptr
   cdef size_t size, offset, prev
   cdef unsigned int kind
@@ -175,7 +205,7 @@ def _pack_str (packer xm, str value, tag):
   memcpy (ptr + offset, PyUnicode_DATA (value), size + kind)
   xm.bump (offset - prev + size + kind)
 
-cdef _pack_bytes (packer xm, value, tag):
+cdef _pack_bytes (Packer xm, value, tag):
   cdef char *ptr
   cdef const char *src
   cdef size_t offset, size, prev
@@ -196,7 +226,6 @@ cdef _pack_bytes (packer xm, value, tag):
   xm.bump (offset - prev + size)
 
 cdef dict _TYPECODES_MAP = {
-  float: tpcode.FLOAT,
   str: tpcode.STR,
   bytes: tpcode.BYTES,
   bytearray: tpcode.BYTEARRAY,
@@ -216,16 +245,25 @@ cdef int _inline_pack (obj):
     return tpcode.FALSE
   return -1
 
-cdef int _type_code (obj, packer xm):
+cdef int _int_code (obj):
+  if INT8_MIN <= obj <= INT8_MAX:
+    return tpcode.INT8
+  elif INT16_MIN <= obj <= INT16_MAX:
+    return tpcode.INT16
+  elif INT32_MIN <= obj <= INT32_MAX:
+    return tpcode.INT32
+  elif INT64_MIN <= obj <= INT64_MAX:
+    return tpcode.INT64
+  return tpcode.NUM
+
+cdef int _type_code (obj, Packer xm):
   ret = _inline_pack (obj)
   if ret >= 0:
     return ret
   elif isinstance (obj, int):
-    if IWORD_MIN <= obj <= IWORD_MAX:
-      return tpcode.INT
-    elif 0 <= obj <= WORD_MAX:
-      return tpcode.UINT
-    return tpcode.NUM
+    return _int_code (obj)
+  elif isinstance (obj, float):
+    return _float_code (obj)
 
   tmp = xm.id_cache.get (id (obj))
   if tmp is not None:
@@ -237,59 +275,47 @@ cdef int _type_code (obj, packer xm):
     return tpcode.CUSTOM
   return _TYPECODES_MAP.get (typ, tpcode.OTHER)
 
-cdef tuple _compute_basic_types (iterable):
-  all_ints, all_flts = (None, None)
+cdef int _compute_basic_type (iterable):
+  cdef int rv, tmp
+
+  rv = -1
   for elem in iterable:
     if type (elem) is int:
-      all_flts = 0
-      if all_ints == 0:
-        continue
-      if IWORD_MIN <= elem <= IWORD_MAX:
-        if all_ints is not None and all_ints > 0:
-          all_ints = 0
-        elif all_ints is None:
-          all_ints = -1
-      elif elem <= WORD_MAX:
-        if all_ints is not None and all_ints < 0:
-          all_ints = 0
-        elif all_ints is None:
-          all_ints = 1
+      if rv > tpcode.INT64:
+        # We had non-ints previously.
+        return -1
+
+      tmp = _int_code (elem)
+      if tmp == tpcode.NUM:
+        return -1
+
+      rv = max (rv, tmp)
     elif type (elem) is float:
-      all_ints = 0
-      if all_flts == 0:
-        continue
-      all_flts = 1
+      if rv > 0 and rv != tpcode.FLOAT32 and rv != tpcode.FLOAT64:
+        return -1
+
+      rv = max (rv, _float_code (elem))
     else:
-      all_ints = all_flts = 0
+      return -1
 
-  return (all_ints, all_flts)
+  return rv
 
-cdef _pack_array (packer xm, value, tag):
+cdef _pack_array (Packer xm, value, tag):
   cdef size_t off
-  cdef packer m2
+  cdef Packer m2
+  cdef int xtype
 
-  all_ints, all_flts = _compute_basic_types (value)
+  xtype = _compute_basic_type (value)
 
   if tag:
     xm.putb (tpcode.LIST if type (value) is list else tpcode.TUPLE)
 
-  if all_ints:
-    if all_ints < 0:
-      xm.putb (tpcode.INT)
-      icode = _IWORD_FMT
-    else:
-      xm.putb (tpcode.UINT)
-      icode = _WORD_FMT
-
-    xm.align_to (sizeof (size_t))
+  if xtype >= 0:
+    xm.putb (xtype)
+    fmt = _BASIC_FMTS[xtype]
+    xm.align_to (_BASIC_SIZES[xtype])
     size = len (value)
-    xm.pack_struct (_WORD_FMT + str (size) + icode, size, *value)
-    return
-  elif all_flts:
-    xm.putb (tpcode.FLOAT)
-    xm.align_to (sizeof (double))
-    size = len (value)
-    xm.pack_struct (_WORD_FMT + str (size) + "d", size, *value)
+    xm.pack_struct (_WORD_FMT + str (size) + fmt, size, *value)
     return
 
   tpcodes = []
@@ -304,10 +330,10 @@ cdef _pack_array (packer xm, value, tag):
 
     off = m2.offset
     m2.pack (elem, False)
-    if off >= 0x4000000:
+    if off >= _WIDE_LIMIT:
       wide = True
 
-    tpcodes[-1] |= off << 5
+    tpcodes[-1] |= off << _OFF_SHIFT
 
   tplen = len (tpcodes)
   base_fmt = "=c" + _WORD_FMT
@@ -324,19 +350,16 @@ cdef _pack_array (packer xm, value, tag):
 def _key_by_index (idx, obj):
   return obj[idx]
 
-cdef _pack_set (packer xm, value, tag):
+cdef _pack_set (Packer xm, value, tag):
   cdef size_t offset, size, hv
-  cdef unsigned int eidx
-  cdef packer m2
-
-  all_ints, all_flts = _compute_basic_types (value)
+  cdef Packer m2
 
   if tag:
     xm.putb (tpcode.SET)
 
   offset = xm.offset
 
-  if all_ints or all_flts:
+  if _compute_basic_type (value) >= 0:
     lst = tuple (sorted (value))
     _pack_array (xm, lst, False)
     return
@@ -344,12 +367,11 @@ cdef _pack_set (packer xm, value, tag):
   offcodes = []
   wide = False
   m2 = xm.copy ()
-  eidx = Little_Endian_p
 
   for elem in value:
     ty = _type_code (elem, xm)
     hv = _xhash (elem, xm.hash_seed)
-    if hv >= 0x4000000:
+    if hv >= _WIDE_LIMIT:
       wide = True
 
     offcodes.append ([hv, ty])
@@ -358,12 +380,12 @@ cdef _pack_set (packer xm, value, tag):
 
     off = m2.offset
     m2.pack (elem, False)
-    if off >= 0x4000000:
+    if off >= _WIDE_LIMIT:
       wide = True
 
-    offcodes[-1][eidx] |= off << 5
+    offcodes[-1][1] |= off << _OFF_SHIFT
 
-  offcodes.sort (key = partial (_key_by_index, 1 - eidx))
+  offcodes.sort (key = partial (_key_by_index, 0))
   offcodes = sum (offcodes, [])
   tplen = len (offcodes)
   base_fmt = "=c" + _WORD_FMT
@@ -376,10 +398,9 @@ cdef _pack_set (packer xm, value, tag):
     xm.align_to (sizeof (long long))
   xm.bwrite (m2)
 
-cdef _pack_dict (packer xm, value, tag):
+cdef _pack_dict (Packer xm, value, tag):
   cdef size_t hv
-  cdef unsigned int eidx
-  cdef packer m2
+  cdef Packer m2
 
   if tag:
     xm.putb (tpcode.DICT)
@@ -388,32 +409,31 @@ cdef _pack_dict (packer xm, value, tag):
   offcodes = []
   wide = False
   m2 = xm.copy ()
-  eidx = Little_Endian_p << 1
 
   for key, val in value.items ():
     hv = _xhash (key, xm.hash_seed)
     t1 = _type_code (key, xm)
     t2 = _type_code (val, xm)
 
-    if hv >= 0x4000000:
+    if hv >= _WIDE_LIMIT:
       wide = True
 
     offcodes.append ([hv, t1, t2])
     if t1 not in (tpcode.NONE, tpcode.TRUE, tpcode.FALSE):
       off = m2.offset
       m2.pack (key, False)
-      if off >= 0x4000000:
+      if off >= _WIDE_LIMIT:
         wide = True
-      offcodes[-1][1] |= off << 5
+      offcodes[-1][1] |= off << _OFF_SHIFT
 
     if t2 not in (tpcode.NONE, tpcode.TRUE, tpcode.FALSE):
       off = m2.offset
       m2.pack (val, False)
-      if off >= 0x4000000:
+      if off >= _WIDE_LIMIT:
         wide = True
-      offcodes[-1][eidx] |= off << 5
+      offcodes[-1][2] |= off << _OFF_SHIFT
 
-  offcodes.sort (key = partial (_key_by_index, 2 - eidx))
+  offcodes.sort (key = partial (_key_by_index, 0))
   offcodes = sum (offcodes, [])
   tplen = len (offcodes)
   base_fmt = "=c" + _WORD_FMT
@@ -429,7 +449,7 @@ cdef _pack_dict (packer xm, value, tag):
 cdef inline object _encode_str (object x):
   return PyUnicode_AsEncodedString (x, "utf8", cy.NULL)
 
-cdef _write_type (packer xm, typ):
+cdef _write_type (Packer xm, typ):
   cdef size_t sz
 
   path = _encode_str (typ.__module__ + "." + typ.__name__)
@@ -451,13 +471,19 @@ cdef dict _obj_vars (obj):
 
   ret = getattr (obj, "__slots__", _SENTINEL)
   if ret is not _SENTINEL:
-    return {key: getattr (obj, key, None) for key in ret}
+    xmap = {}
+    for key in ret:
+      tmp = getattr (obj, key, _SENTINEL)
+      if tmp is not _SENTINEL:
+        xmap[key] = tmp
+
+    return xmap
 
   raise TypeError ("cannot get attributes from object of type %r" % type (obj))
 
-cdef _pack_generic (packer xm, value, tag):
+cdef _pack_generic (Packer xm, value, tag):
   cdef size_t off, extra
-  cdef packer m2
+  cdef Packer m2
 
   if tag:
     xm.putb (tpcode.OTHER)
@@ -471,7 +497,7 @@ cdef _pack_generic (packer xm, value, tag):
   for key, val in attrs.items ():
     key = _encode_str (key)
     slen = len (key)
-    if slen >= 0x400000:
+    if slen >= _WIDE_LIMIT:
       wide = 1
 
     ty = _type_code (val, xm)
@@ -480,8 +506,8 @@ cdef _pack_generic (packer xm, value, tag):
     if ty not in (tpcode.NONE, tpcode.TRUE, tpcode.FALSE):
       off = m2.offset
       m2.pack (val, False)
-      data[-1] |= off << 5
-      if off >= 0x400000:
+      data[-1] |= off << _OFF_SHIFT
+      if off >= _WIDE_LIMIT:
         wide = 1
 
   keys = _encode_str ("".join (attrs.keys ()))
@@ -526,13 +552,13 @@ cdef object _get_import_key (object key):
 
   return key
 
-cdef class packer:
+cdef class Packer:
   """
-  Class used to pack arbitrary objects into a byte stream.
-  Instances of this class are responsible of keeping certain invariants,
-  the most important being that objects are packed at aligned boundaries,
-  to make the unpacking operations fast and safe across architectures
-  with different constraints.
+  Packs arbitrary objects into a byte stream.
+  Instances of ``Packer`` are responsible for maintaining certain invariants,
+  the most important being that objects are packed at aligned boundaries to
+  make the unpacking operations fast and safe across architectures with
+  strict constraints.
   """
 
   cdef size_t offset
@@ -544,9 +570,9 @@ cdef class packer:
   cdef object import_key
 
   def __init__ (self, offset = 0, id_cache = None, hash_seed = 0,
-      custom_packers = None, initial_size = 8, import_key = None):
+                custom_packers = None, initial_size = 8, import_key = None):
     """
-    Constructs a packer.
+    Constructs a Packer.
 
     :param int offset *(default 0)*: Starting offset at which objects are
       meant to be packed into.
@@ -577,11 +603,11 @@ cdef class packer:
 
   cpdef copy (self):
     """
-    Create an equivalent copy of the packer. Useful when packing complex
+    Create an equivalent copy of the Packer. Useful when packing complex
     objects that need constituent members to be packed separatedly without
-    modifying the initial packer.
+    modifying the initial Packer.
     """
-    return packer (0, id_cache = self.id_cache.copy (),
+    return Packer (0, id_cache = self.id_cache.copy (),
                    hash_seed = self.hash_seed,
                    custom_packers = self.custom_packers,
                    initial_size = 8, import_key = self.import_key)
@@ -633,12 +659,12 @@ cdef class packer:
   cpdef bwrite (self, obj):
     """
     Write a binary object to the stream.
-    If ``obj`` is itself a packer, then concatenate its stream to ours.
+    If ``obj`` is itself a Packer, then concatenate its stream to ours.
     """
     cdef size_t size
 
-    if isinstance (obj, packer):
-      obj = (<packer>obj).as_bytearray ()
+    if isinstance (obj, Packer):
+      obj = (<Packer>obj).as_bytearray ()
 
     size = len (obj)
     self.resize (size)
@@ -646,7 +672,7 @@ cdef class packer:
     self.bump (size)
 
   cpdef as_bytearray (self):
-    "Return a copy of the packer's byte stream so far."
+    "Return a copy of the Packer's byte stream so far."
     return self.wbytes[:self.wlen]
 
   cpdef pack (self, obj, tag = True):
@@ -692,24 +718,24 @@ cdef class packer:
         _pack_generic (self, obj, tag)
 
       return self.offset - prev
-    except:
+    except Exception:
       self.id_cache.pop (obj_id, None)
       raise
 
-cdef inline object _cnum_unpack (proxy_handler self, size_t offs, cnum value):
+cdef inline object _cnum_unpack (Proxy self, size_t offs, cnum value):
   cdef size_t extra
 
   extra = _get_padding (offs, sizeof (value))
   self._assert_len (offs + extra + sizeof (value))
   return (<const cnum*> (self.base + offs + extra))[0]
 
-cdef class proxy_handler:
+cdef class Proxy:
   """
-  Class used to manage an underlying mapping so that objects can be safely
-  and efficiently proxied.
-  As a counterpart to the ``packer`` class, a ``proxy_handler`` ensures that
-  proxy objects have enough room in their backing, and that their lifetimes
-  don't extend beyond the mapping's.
+  Manages the underlying mapping so that objects can be safely and also
+  efficiently 'proxied'.
+  As a counterpart to the ``Packer`` class, a ``Proxy`` ensures that
+  proxied objects have enough room in their backing store, and that their
+  lifetimes never extend beyond their mapping's.
   """
 
   cdef object mbuf
@@ -723,9 +749,9 @@ cdef class proxy_handler:
   cdef object import_key
 
   def __init__ (self, mapping, offset = 0, size = None, rw = False,
-      hash_seed = 0, verify_str = False, import_key = None):
+                hash_seed = 0, verify_str = False, import_key = None):
     """
-    Constructs a proxy_handler.
+    Constructs a Proxy.
 
     :param mapping: The mapping object. If the object has a ``fileno`` method,
       it will be assumed to be a file, and its file descriptor will be used
@@ -741,12 +767,12 @@ cdef class proxy_handler:
       If ``False``, the mapping will be assumed to be read-ony, and no
       modifications will be allowed.
 
-    :param int hash_seed *(default 0)*: See ``packer.__init__``.
+    :param int hash_seed *(default 0)*: See ``Packer.__init__``.
 
     :param bool verify_str *(default False)*: Whether to check for strings
       consistency (unicode-wise) when unpacking them.
 
-    :param import_key *(default None)*: See ``packer.__init__``.
+    :param import_key *(default None)*: See ``Packer.__init__``.
     """
     cdef const unsigned char[:] p0
 
@@ -783,7 +809,7 @@ cdef class proxy_handler:
   @cy.final
   cdef object _assert_len (self, size_t size):
     if self.max_size < size:
-      raise ValueError ("buffer too small")
+      raise IndexError ("buffer too small")
 
   def __getbuffer__ (self, Py_buffer *buf, int flags):
     PyObject_GetBuffer (self.mbuf, buf, flags)
@@ -807,11 +833,17 @@ cdef class proxy_handler:
     cdef size_t size, rel_off
     cdef unsigned int ilen
 
-    if code == tpcode.INT:
-      return _cnum_unpack[Py_ssize_t] (self, offset, 0)
-    elif code == tpcode.UINT:
-      return _cnum_unpack[size_t] (self, offset, 0)
-    elif code == tpcode.FLOAT:
+    if code == tpcode.INT8:
+      return _cnum_unpack[char] (self, offset, 0)
+    elif code == tpcode.INT16:
+      return _cnum_unpack[short] (self, offset, 0)
+    elif code == tpcode.INT32:
+      return _cnum_unpack[int] (self, offset, 0)
+    elif code == tpcode.INT64:
+      return _cnum_unpack[cy.longlong] (self, offset, 0)
+    elif code == tpcode.FLOAT32:
+      return _cnum_unpack[float] (self, offset, 0)
+    elif code == tpcode.FLOAT64:
       return _cnum_unpack[double] (self, offset, 0)
     elif code == tpcode.NUM:
       self._assert_len (offset + sizeof (ilen))
@@ -820,7 +852,7 @@ cdef class proxy_handler:
       return Int_From_Bytes (self.mbuf[offset:offset + ilen],
                              SYS_endian, signed = True)
     elif code == tpcode.STR:
-      return proxy_str._make (self, offset)
+      return ProxyStr._make (self, offset)
     elif code in (tpcode.BYTES, tpcode.BYTEARRAY):
       self._assert_len (offset + 1)
       size = self.base[offset]
@@ -830,7 +862,8 @@ cdef class proxy_handler:
         offset += sizeof (size)
 
       offset += 1
-      return Bytes_Cls[code - tpcode.BYTES] (self.mbuf[offset:offset + size])
+      mbx = self.mbuf[offset:offset + size]
+      return bytes(mbx) if code == tpcode.BYTES else bytearray(mbx)
     elif code == tpcode.NONE:
       return None
     elif code == tpcode.TRUE:
@@ -838,11 +871,11 @@ cdef class proxy_handler:
     elif code == tpcode.FALSE:
       return False
     elif code == tpcode.LIST or code == tpcode.TUPLE:
-      return proxy_list._make (self, offset, code == tpcode.LIST)
+      return ProxyList._make (self, offset, code == tpcode.LIST)
     elif code == tpcode.SET:
-      return proxy_set._make (self, offset)
+      return ProxySet._make (self, offset)
     elif code == tpcode.DICT:
-      return proxy_dict._make (self, offset)
+      return ProxyDict._make (self, offset)
     elif code == tpcode.BACKREF:
       self._assert_len (offset + sizeof (offset))
       memcpy (&offset, self.base + offset, sizeof (offset))
@@ -854,14 +887,14 @@ cdef class proxy_handler:
       fn = _dispatch_type_impl (self.custom_packers, typ, direction.UNPACK)
       if fn is None:
         raise TypeError ("cannot unpack type %r" % typ)
-      return fn (typ, self, offset + _get_padding (offset,
-                                                   sizeof (long long)))
+      return fn (typ, self, offset +
+                            _get_padding (offset, sizeof (long long)))
     raise TypeError ("Cannot unpack typecode %r" % code)
 
   cdef object _unpack_with_data (self, unsigned long long data,
-                                 proxy_list indices):
-    return self._unpack_with_code ((data >> 5) + indices.offset +
-                                   indices.sub_off, data & 0x1f)
+                                 ProxyList indices):
+    return self._unpack_with_code ((data >> _OFF_SHIFT) + indices.offset +
+                                   indices.sub_off, data & _CODE_MASK)
 
   @cy.final
   cdef object _unpack (self, size_t offs):
@@ -883,25 +916,108 @@ cdef class proxy_handler:
     """
     return self._unpack_with_code (self.offset if off is None else off, code)
 
-cdef inline int atomic_cas_f (void *ptr, double exp, double nval) except -1:
-  cdef int ret
+############################################
 
-  ret = _atomic_cas_f (ptr, exp, nval)
-  if ret < 0:
-    raise RuntimeError ("platform does not support CAS for doubles")
-  return ret
+cdef inline object _builtin_read (void *buf, Py_ssize_t pos,
+                                  unsigned int code):
+  if code == tpcode.INT8:
+    return (<char *>buf)[pos]
+  elif code == tpcode.INT16:
+    return (<short *>buf)[pos]
+  elif code == tpcode.INT32:
+    return (<int *>buf)[pos]
+  elif code == tpcode.INT64:
+    return (<long long *>buf)[pos]
+  elif code == tpcode.FLOAT32:
+    return (<float *>buf)[pos]
+  return (<double *>buf)[pos]
 
-cdef inline double atomic_add_f (void *ptr, double value):
-  cdef double tmp
+cdef inline void _builtin_write (void *buf, Py_ssize_t pos,
+                                 object obj, unsigned int code):
+  if code == tpcode.INT8:
+    (<int *>buf)[pos] = obj
+  elif code == tpcode.INT16:
+    (<short *>buf)[pos] = obj
+  elif code == tpcode.INT32:
+    (<int *>buf)[pos] = obj
+  elif code == tpcode.INT64:
+    (<long long *>buf)[pos] = obj
+  elif code == tpcode.FLOAT32:
+    (<float *>buf)[pos] = obj
+  elif code == tpcode.FLOAT64:
+    (<double *>buf)[pos] = obj
 
-  while 1:
-    tmp = (<double *>ptr)[0]
-    if atomic_cas_f (ptr, tmp, tmp + value):
-      return tmp
-    atomic_fence ()
+  atomic_fence ()
 
-cdef class proxy_list:
-  cdef proxy_handler proxy
+cdef inline bint _builtin_acas_impl (cnum *ptr, object o_exp, object o_nval):
+  cdef cnum exp, val
+
+  exp = o_exp
+  val = o_nval
+  return atomic_cas_bool (ptr, &exp, &val)
+
+cdef inline object _cfloat_aadd (cfloat *ptr, object val):
+  cdef long long qexp, qnew
+  cdef int iexp, inew
+  cdef cfloat delta, tmp, new
+
+  delta = val
+  if cfloat is float:
+    while 1:
+      tmp = ptr[0]
+      new = tmp + delta
+      memcpy (&iexp, &tmp, sizeof (iexp))
+      memcpy (&inew, &new, sizeof (new))
+      if atomic_cas_bool (<int *>ptr, &iexp, &inew):
+        return tmp
+  else:
+    while 1:
+      tmp = ptr[0]
+      new = tmp + delta
+      memcpy (&qexp, &tmp, sizeof (qexp))
+      memcpy (&qnew, &new, sizeof (new))
+      if atomic_cas_bool (<long long *>ptr, &qexp, &qnew):
+        return tmp
+
+cdef inline object _builtin_aadd_impl (cnum *ptr, object val):
+  cdef cnum xv
+
+  xv = val
+  atomic_add (ptr, &xv)
+  return xv
+
+cdef inline object _builtin_aadd (void *buf, Py_ssize_t pos,
+                                  object val, unsigned int code):
+  if code == tpcode.INT8:
+    return _builtin_aadd_impl[char] (<char *>buf + pos, val)
+  elif code == tpcode.INT16:
+    return _builtin_aadd_impl[short] (<short *>buf + pos, val)
+  elif code == tpcode.INT32:
+    return _builtin_aadd_impl[int] (<int *>buf + pos, val)
+  elif code == tpcode.INT64:
+    return _builtin_aadd_impl[cy.longlong] (<long long *>buf + pos, val)
+  elif code == tpcode.FLOAT32:
+    return _cfloat_aadd[float] (<float *>buf + pos, val)
+  else:
+    return _cfloat_aadd[double] (<double *>buf + pos, val)
+
+cdef object _builtin_acas (void *buf, Py_ssize_t pos, object exp,
+                           object nval, unsigned int code):
+  if code == tpcode.INT8:
+    return _builtin_acas_impl[char] (<char *>buf + pos, exp, nval)
+  elif code == tpcode.INT16:
+    return _builtin_acas_impl[short] (<short *>buf + pos, exp, nval)
+  elif code == tpcode.INT32:
+    return _builtin_acas_impl[int] (<int *>buf + pos, exp, nval)
+  elif code == tpcode.INT64:
+    return _builtin_acas_impl[cy.longlong] (<long long *>buf + pos, exp, nval)
+  elif code == tpcode.FLOAT32:
+    return _builtin_acas_impl[float] (<float *>buf + pos, exp, nval)
+  else:
+    return _builtin_acas_impl[double] (<double *>buf + pos, exp, nval)
+
+cdef class ProxyList:
+  cdef Proxy proxy
   cdef size_t offset
   cdef size_t sub_off
   cdef size_t size
@@ -910,20 +1026,20 @@ cdef class proxy_list:
   cdef bint mutable
 
   @staticmethod
-  cdef proxy_list _make (proxy_handler proxy, size_t off, bint mutable):
-    cdef proxy_list self
+  cdef ProxyList _make (Proxy proxy, size_t off, bint mutable):
+    cdef ProxyList self
     cdef size_t esz
     cdef unsigned int ty
     cdef bint rdwr
 
-    self = proxy_list.__new__ (proxy_list)
+    self = ProxyList.__new__ (ProxyList)
     self.proxy = proxy
     self.offset = off
 
     ty = self.proxy[self.offset]
-    if ty <= tpcode.FLOAT:
-      # Inline objects: (s)size_t and double's
-      esz = sizeof (double) if ty == tpcode.FLOAT else sizeof (size_t)
+    if _is_inline_code (ty):
+      # Inline objects: Integers or floats.
+      esz = _BASIC_SIZES[ty]
       self.offset += _get_padding (self.offset + 1, esz) + 1
       self.proxy._assert_len (self.offset + sizeof (size_t))
       self.size = (<size_t *> (self.proxy.base + self.offset))[0]
@@ -960,18 +1076,11 @@ cdef class proxy_list:
     pos *= self.step
     ptr = self.proxy.base + self.offset
 
-    if code == tpcode.INT:
+    if _is_inline_code (code):
       if self.mutable:
         atomic_fence ()
-      return (<Py_ssize_t *>ptr)[pos]
-    elif code == tpcode.UINT:
-      if self.mutable:
-        atomic_fence ()
-      return (<size_t *>ptr)[pos]
-    elif code == tpcode.FLOAT:
-      if self.mutable:
-        atomic_fence ()
-      return (<double *>ptr)[pos]
+
+      return _builtin_read (ptr, pos, code)
     else:
       if self.code == b"I":
         data = (<unsigned int *>ptr)[pos]
@@ -983,7 +1092,7 @@ cdef class proxy_list:
   @cy.cdivision (True)
   def __getitem__ (self, idx):
     cdef Py_ssize_t pos, n, start, end, step, rsize
-    cdef proxy_list rv
+    cdef ProxyList rv
 
     if isinstance (idx, int):
       pos = idx
@@ -997,34 +1106,33 @@ cdef class proxy_list:
         raise IndexError ("index out of bounds")
 
       return self._c_index (pos, self.code)
-    elif isinstance (idx, slice):
-      PySlice_GetIndices (idx, self.size, &start, &end, &step)
+    elif not isinstance (idx, slice):
+      raise TypeError ("index must be an integer or slice")
 
-      rv = proxy_list.__new__ (proxy_list)
-      rv.proxy = self.proxy
-      rv.code = self.code
+    PySlice_GetIndices (idx, self.size, &start, &end, &step)
 
-      rsize = (end - start) // step
-      if ((end - start) % step) != 0:
-        rsize += 1
+    rv = ProxyList.__new__ (ProxyList)
+    rv.proxy = self.proxy
+    rv.code = self.code
 
-      rv.size = rsize
-      rv.offset = self.offset
+    rsize = (end - start) // step
+    if ((end - start) % step) != 0:
+      rsize += 1
 
-      if rv.code == tpcode.FLOAT:
-        start *= sizeof (double)
-      elif rv.code == tpcode.INT or rv.code == tpcode.UINT:
-        start *= sizeof (size_t)
-      elif rv.code == b"I":
-        start *= sizeof (int)
-      else:
-        start *= sizeof (long long)
+    rv.size = rsize
+    rv.offset = self.offset
 
-      rv.offset += start * self.step
-      rv.sub_off = self.sub_off + self.offset - rv.offset
-      rv.step = step * self.step
-      return rv
-    raise TypeError ("index must be an integer or slice")
+    if _is_inline_code (rv.code):
+      start *= _BASIC_SIZES[rv.code]
+    elif rv.code == b"I":
+      start *= sizeof (int)
+    else:
+      start *= sizeof (long long)
+
+    rv.offset += start * self.step
+    rv.sub_off = self.sub_off + self.offset - rv.offset
+    rv.step = step * self.step
+    return rv
 
   cdef Py_ssize_t _mutable_idx (self, idx) except -1:
     cdef Py_ssize_t pos
@@ -1032,7 +1140,7 @@ cdef class proxy_list:
 
     if not self.mutable:
       raise TypeError ("cannot modify read-only proxy list")
-    elif self.code > tpcode.FLOAT:
+    elif not _is_inline_code (self.code):
       raise TypeError ("cannot modify proxy list with indirect objects")
 
     pos = idx
@@ -1052,58 +1160,38 @@ cdef class proxy_list:
     pos = self._mutable_idx (idx)
     ptr = self.proxy.base + self.offset
 
-    if self.code == tpcode.INT:
-      (<Py_ssize_t *>ptr)[pos] = value
-    elif self.code == tpcode.UINT:
-      (<size_t *>ptr)[pos] = value
-    elif self.code == tpcode.FLOAT:
-      (<double *>ptr)[pos] = value
+    if _is_inline_code (self.code):
+      _builtin_write (ptr, pos, value, self.code)
     else:
       raise TypeError ("cannot modify non-primitive proxy list")
-
-    atomic_fence ()
 
   def atomic_cas (self, idx, exp, nval):
     """
     Atomically compare the value at ``idx``, and if it's equal to ``exp``, set
     it to ``nval``. Returns True if the operation was successful.
     """
-    cdef Py_ssize_t pos, rv
-    cdef char *ptr
+    cdef Py_ssize_t pos
 
-    pos = self._mutable_idx (idx)
-    ptr = self.proxy.base + self.offset
+    if _is_inline_code (self.code):
+      pos = self._mutable_idx (idx)
+      return _builtin_acas (self.proxy.base + self.offset, pos,
+                            exp, nval, self.code)
 
-    if self.code == tpcode.INT:
-      rv = atomic_cas_i ((<Py_ssize_t *>ptr) + pos, exp, nval)
-    elif self.code == tpcode.UINT:
-      rv = atomic_cas_I ((<size_t *>ptr) + pos, exp, nval)
-    elif self.code == tpcode.FLOAT:
-      rv = atomic_cas_f ((<double *>ptr) + pos, exp, nval)
-    else:
-      raise TypeError ("atomics are not supported for this proxy list's values")
+    raise TypeError ("cannot perform atomic-cas on non builtin types")
 
-    return True if rv != 0 else False
-
-  def atomic_add (self, idx, value):
+  def atomic_add (self, idx, val):
     """
-    Atomically add ``value`` to the value at ``idx``, returning the previous
+    Atomically add ``val`` to the value at ``idx``, returning the previous
     value at that position.
     """
+
     cdef Py_ssize_t pos
-    cdef char *ptr
 
-    pos = self._mutable_idx (idx)
-    ptr = self.proxy.base + self.offset
+    if _is_inline_code (self.code):
+      pos = self._mutable_idx (idx)
+      return _builtin_aadd (self.proxy.base + self.offset, pos, val, self.code)
 
-    if self.code == tpcode.INT:
-      return atomic_add_i ((<Py_ssize_t *>ptr) + pos, value)
-    elif self.code == tpcode.UINT:
-      return atomic_add_I ((<size_t *>ptr) + pos, value)
-    elif self.code == tpcode.FLOAT:
-      return atomic_add_f ((<double *>ptr) + pos, value)
-    else:
-      raise TypeError ("atomics are not supported for this proxy list's values")
+    raise TypeError ("cannot perform atomic-add on non builtin types")
 
   def __hash__ (self):
     return _xhash (self, self.proxy.hash_seed)
@@ -1120,22 +1208,22 @@ cdef class proxy_list:
     return "[%s]" % ",".join ([str (x) for x in self])
 
   def __repr__ (self):
-    return "proxy_list(%s)" % self
+    return "ProxyList(%s)" % self
 
   def __add__ (self, x):
     cdef bint rdwr
     cdef type typ
 
-    if not isinstance (x, proxy_list):
-      typ = list if (<proxy_list>self).mutable else tuple
+    if not isinstance (x, ProxyList):
+      typ = list if (<ProxyList>self).mutable else tuple
       if typ is not type (x):
-        raise TypeError ("cannot add proxy_list to %r" % type(x).__name__)
+        raise TypeError ("cannot add ProxyList to %r" % type(x).__name__)
     else:
-      rdwr = (<proxy_list>x).mutable
+      rdwr = (<ProxyList>x).mutable
       typ = list if rdwr else tuple
-      if ((isinstance (self, proxy_list) and
-          rdwr != (<proxy_list>self).mutable) or
-            (not isinstance (self, proxy_list) and
+      if ((isinstance (self, ProxyList) and
+          rdwr != (<ProxyList>self).mutable) or
+            (not isinstance (self, ProxyList) and
               not isinstance (self, typ))):
         raise TypeError ("cannot add proxy lists of different mutability")
 
@@ -1185,7 +1273,7 @@ cdef class proxy_list:
   cdef int _cmp (self, x, bint err, bint eq) except -2:
     cdef size_t alen, blen, i
 
-    if not isinstance (x, (tuple, list, proxy_list)):
+    if not isinstance (x, (tuple, list, ProxyList)):
       if err:
         raise TypeError ("cannot compare types: (%r and %r)" %
                          (type(self).__name__, type(x).__name__))
@@ -1217,9 +1305,9 @@ cdef class proxy_list:
       return 0
 
   def __eq__ (self, x):
-    if isinstance (self, proxy_list):
-      return (<proxy_list>self)._cmp (x, False, True) == 0
-    return (<proxy_list>x)._cmp (self, False, True) == 0
+    if isinstance (self, ProxyList):
+      return (<ProxyList>self)._cmp (x, False, True) == 0
+    return (<ProxyList>x)._cmp (self, False, True) == 0
 
   def __lt__ (self, x):
     return self._cmp (x, True, False) < 0
@@ -1256,17 +1344,17 @@ cdef object _verify_str (void *ptr, size_t size, unsigned int kind):
           (<const unsigned short *>ptr)[i] <  0xe000):
         raise ValueError ("invalid codepoint for UCS-2 string")
 
-cdef class proxy_str:
-  cdef proxy_handler proxy
+cdef class ProxyStr:
+  cdef Proxy proxy
   cdef str uobj
 
   @staticmethod
-  cdef proxy_str _make (proxy_handler proxy, size_t off):
-    cdef proxy_str self
+  cdef ProxyStr _make (Proxy proxy, size_t off):
+    cdef ProxyStr self
     cdef size_t size
     cdef unsigned int kind, orig_kind
 
-    self = proxy_str.__new__ (proxy_str)
+    self = ProxyStr.__new__ (ProxyStr)
     self.proxy = proxy
 
     orig_kind = kind = self.proxy[off]
@@ -1324,7 +1412,7 @@ cdef class proxy_str:
 
   def __getitem__ (self, ix):
     cdef Py_ssize_t start, end, step, slen
-    cdef proxy_str rv
+    cdef ProxyStr rv
 
     if not isinstance (ix, slice):
       ret = self.uobj[ix]
@@ -1340,14 +1428,14 @@ cdef class proxy_str:
     elif start >= end:
       return ''
 
-    rv = proxy_str.__new__ (proxy_str)
+    rv = ProxyStr.__new__ (ProxyStr)
     rv.proxy = self.proxy
     rv.uobj = STR_NEW (STR_KIND (self.uobj), min (end - start, slen),
                        (<char *>PyUnicode_DATA (self.uobj)) + start)
     return rv
 
   # These arithmetic operators are placeholders until we can install
-  # the real implementations once the 'proxy_str' type is finalized.
+  # the real implementations once the 'ProxyStr' type is finalized.
   def __add__ (self, x):
     return self
 
@@ -1368,65 +1456,65 @@ cdef class proxy_str:
 
   @staticmethod
   cdef object _cmp_impl (self, x, fn):
-    cdef proxy_str this
+    cdef ProxyStr this
 
-    if isinstance (self, proxy_str):
-      this = <proxy_str>self
-      if isinstance (x, proxy_str):
-        return fn (this.uobj, (<proxy_str>x).uobj)
+    if isinstance (self, ProxyStr):
+      this = <ProxyStr>self
+      if isinstance (x, ProxyStr):
+        return fn (this.uobj, (<ProxyStr>x).uobj)
       elif isinstance (x, str):
         return fn (this.uobj, x)
       else:
         return fn (str (this), x)
     else:
-      this = <proxy_str>x
-      if isinstance (self, proxy_str):
-        return fn ((<proxy_str>self).uobj, this.uobj)
+      this = <ProxyStr>x
+      if isinstance (self, ProxyStr):
+        return fn ((<ProxyStr>self).uobj, this.uobj)
       elif isinstance (self, str):
         return fn (self, this.uobj)
       else:
         return fn (self, str (this))
 
   def __eq__ (self, x):
-    return proxy_str._cmp_impl (self, x, OP_eq)
+    return ProxyStr._cmp_impl (self, x, OP_eq)
 
   def __ge__ (self, x):
-    return proxy_str._cmp_impl (self, x, OP_ge)
+    return ProxyStr._cmp_impl (self, x, OP_ge)
 
   def __gt__ (self, x):
-    return proxy_str._cmp_impl (self, x, OP_gt)
+    return ProxyStr._cmp_impl (self, x, OP_gt)
 
   def __iter__ (self):
     for ch in self.uobj:
       yield ch
 
   def __le__ (self, x):
-    return proxy_str._cmp_impl (self, x, OP_le)
+    return ProxyStr._cmp_impl (self, x, OP_le)
 
   def __lt__ (self, x):
-    return proxy_str._cmp_impl (self, x, OP_lt)
+    return ProxyStr._cmp_impl (self, x, OP_lt)
 
   def __ne__ (self, x):
-    return proxy_str._cmp_impl (self, x, OP_ne)
+    return ProxyStr._cmp_impl (self, x, OP_ne)
 
 # The following is a kludge to support arbitrary argument order in
 # arithmetic operators. We need to patch things this way because not
 # all Cython versions can be convinced.
 
-cdef str _proxy_str_op_impl (self_, x, typ, bint self_type, fn):
-  cdef proxy_str this
+cdef str _ProxyStr_op_impl (self_, x, typ, bint self_type, fn):
+  cdef ProxyStr this
 
   # For standard operators (i.e: 'str.__add__'), we can use the raw unicode
   # object, since we know there's no danger there. Otherwise, for custom
   # types, we have to copy into a fresh object.
   this = None
-  if isinstance (self_, proxy_str):
+  if isinstance (self_, ProxyStr):
     if isinstance (x, typ):
       this = self_
       ret = fn (this.uobj, x)
-    elif self_type and isinstance (x, proxy_str):
+    elif self_type and isinstance (x, ProxyStr):
       this = self_
-      ret = fn (this.uobj, (<proxy_str>x).uobj)
+      ret = fn (this.uobj, (<ProxyStr>x).uobj)
     else:
       ret = fn (str (self_), x)
   elif isinstance (self_, typ):
@@ -1437,26 +1525,26 @@ cdef str _proxy_str_op_impl (self_, x, typ, bint self_type, fn):
 
   return ret if this is None or ret is not this.uobj else this
 
-cdef _proxy_str_add (x, y):
-  return _proxy_str_op_impl (x, y, str, True, OP_add)
+cdef _ProxyStr_add (x, y):
+  return _ProxyStr_op_impl (x, y, str, True, OP_add)
 
-cdef _proxy_str_mod (x, y):
-  return _proxy_str_op_impl (x, y, str, False, OP_mod)
+cdef _ProxyStr_mod (x, y):
+  return _ProxyStr_op_impl (x, y, str, False, OP_mod)
 
-cdef _proxy_str_mul (x, y):
-  return _proxy_str_op_impl (x, y, int, False, OP_mul)
+cdef _ProxyStr_mul (x, y):
+  return _ProxyStr_op_impl (x, y, int, False, OP_mul)
 
 # Install the new operators.
-TYPE_PATCH (<PyTypeObject *>proxy_str, _proxy_str_add,
-            _proxy_str_mod, _proxy_str_mul)
+TYPE_PATCH (<PyTypeObject *>ProxyStr, _ProxyStr_add,
+            _ProxyStr_mod, _ProxyStr_mul)
 
-cdef inline size_t _rotate_hash (size_t code, size_t nbits):
+cdef inline size_t _rotate_hash (size_t code, size_t nbits) noexcept:
   return (code << nbits) | (code >> (sizeof (size_t) * 8 - nbits))
 
-cdef inline size_t _mix_hash (size_t h1, size_t h2):
+cdef inline size_t _mix_hash (size_t h1, size_t h2) noexcept:
   return _rotate_hash (h1, 5) ^ h2
 
-cdef inline size_t _hash_buf (const void *ptr, size_t nbytes):
+cdef inline size_t _hash_buf (const void *ptr, size_t nbytes) noexcept:
   cdef size_t ret
 
   ret = nbytes
@@ -1466,7 +1554,7 @@ cdef inline size_t _hash_buf (const void *ptr, size_t nbytes):
 
   return ret if ret != 0 else WORD_MAX
 
-cdef inline size_t _hash_str (str sobj):
+cdef inline size_t _hash_str (str sobj) noexcept:
   cdef unsigned int kind
 
   kind = STR_KIND (sobj)
@@ -1474,7 +1562,7 @@ cdef inline size_t _hash_str (str sobj):
     kind = 1
   return _hash_buf (PyUnicode_DATA (sobj), len (sobj) * kind)
 
-cdef inline size_t _hash_flt (double flt):
+cdef inline size_t _hash_flt (double flt) noexcept:
   cdef double ipart
 
   if modf (flt, &ipart) == 0:
@@ -1482,8 +1570,8 @@ cdef inline size_t _hash_flt (double flt):
   return _hash_buf (&flt, sizeof (flt))
 
 cdef dict _HASH_VALUES = {}
-for code, *ty in ((0x1073952, frozenset, proxy_set),
-                  (0x81603094, tuple, proxy_list)):
+for code, *ty in ((0x1073952, frozenset, ProxySet),
+                  (0x81603094, tuple, ProxyList)):
   for typ in ty:
     _HASH_VALUES[typ] = code
 del code
@@ -1504,14 +1592,14 @@ cdef size_t _xhash (obj, size_t seed) except 0:
     ret = _hash_flt (obj)
   elif isinstance (obj, str):
     ret = _hash_str (<str>obj)
-  elif isinstance (obj, proxy_str):
-    ret = _hash_str ((<proxy_str>obj).uobj)
-  elif isinstance (obj, proxy_dict):
+  elif isinstance (obj, ProxyStr):
+    ret = _hash_str ((<ProxyStr>obj).uobj)
+  elif isinstance (obj, ProxyDict):
     ret = hash (obj)
   else:
     ty = type (obj)
-    if isinstance (obj, proxy_list):
-      if (<proxy_list>obj).mutable:
+    if isinstance (obj, ProxyList):
+      if (<ProxyList>obj).mutable:
         raise TypeError ("cannot hash mutable proxy list")
 
     code = _HASH_VALUES.get (ty)
@@ -1536,7 +1624,7 @@ def xhash (obj, seed = 0):
 
 #######################################
 
-cdef inline Py_ssize_t _double_diff (double x, double y):
+cdef inline Py_ssize_t _cfloat_diff (cfloat x, cfloat y) noexcept:
   cdef double ret
 
   ret = x - y
@@ -1555,8 +1643,8 @@ cdef inline Py_ssize_t _double_diff (double x, double y):
       # inf > nan; -inf < nan
       return x > 0
   elif isnan (y):
-    # nan - nan
-    return 0
+    # X - nan
+    return -1
   else:
     # nan < inf; nan > -inf
     return -1 if x > 0 else 1
@@ -1575,8 +1663,8 @@ cdef int _cnum_find_sorted (const unsigned char *ptr, size_t n, obj,
   while i < n:
     step = (i + n) >> 1
     tmp = (<const cnum *>ptr)[step]
-    if cnum is double:
-      cmpr = _double_diff (tmp, value)
+    if cnum is double or cnum is float:
+      cmpr = _cfloat_diff (tmp, value)
     else:
       cmpr = <Py_ssize_t> (tmp - value)
 
@@ -1587,8 +1675,8 @@ cdef int _cnum_find_sorted (const unsigned char *ptr, size_t n, obj,
       step = min (step >> 2, <size_t>64)
       while step > 0:
         tmp = (<const cnum *>ptr)[n]
-        if cnum is double:
-          cmpr = _double_diff (tmp, value)
+        if cnum is double or cnum is float:
+          cmpr = _cfloat_diff (tmp, value)
         else:
           cmpr = <Py_ssize_t> (tmp - value)
 
@@ -1603,8 +1691,8 @@ cdef int _cnum_find_sorted (const unsigned char *ptr, size_t n, obj,
       step = min (step >> 2, <size_t>64)
       while step > 0:
         tmp = (<const cnum *>ptr)[i]
-        if cnum is double:
-          cmpr = _double_diff (tmp, value)
+        if cnum is double or cnum is float:
+          cmpr = _cfloat_diff (tmp, value)
         else:
           cmpr = <Py_ssize_t> (tmp - value)
 
@@ -1618,17 +1706,17 @@ cdef int _cnum_find_sorted (const unsigned char *ptr, size_t n, obj,
 
 @cy.cdivision (True)
 @cy.nogil
-cdef size_t _find_hidx (hidx_type hidxs, size_t hval, size_t n):
+cdef size_t _find_hidx (hidx_type hidxs, size_t hval, size_t n) noexcept:
   cdef size_t i, step, tmp
 
   i = 0
   while i < n:
     step = (i + n) >> 1
-    tmp = hidxs[step].hval
+    tmp = hidxs[step].values[0]
 
     if tmp == hval:
       while step > 0:
-        if hidxs[step - 1].hval != tmp:
+        if hidxs[step - 1].values[0] != tmp:
           break
         step -= 1
       return step + 1
@@ -1636,13 +1724,13 @@ cdef size_t _find_hidx (hidx_type hidxs, size_t hval, size_t n):
       n = step - 1
       step = min (step >> 2, <size_t>512 // sizeof (hidxs[0]))
       while step > 0:
-        tmp = hidxs[n].hval
+        tmp = hidxs[n].values[0]
         if tmp > hval:
           step -= 1
           n -= 1
         elif tmp == hval:
           while n > 0:
-            if hidxs[n - 1].hval != tmp:
+            if hidxs[n - 1].values[0] != tmp:
               break
             n -= 1
           return n + 1
@@ -1653,13 +1741,13 @@ cdef size_t _find_hidx (hidx_type hidxs, size_t hval, size_t n):
       i = step + 1
       step = min (step >> 2, <size_t>512 // sizeof (hidxs[0]))
       while step > 0:
-        tmp = hidxs[i].hval
+        tmp = hidxs[i].values[0]
         if tmp < hval:
           step -= 1
           i += 1
         elif tmp == hval:
           while i > 0:
-            if hidxs[i - 1].hval != tmp:
+            if hidxs[i - 1].values[0] != tmp:
               break
             i -= 1
           return i + 1
@@ -1668,7 +1756,7 @@ cdef size_t _find_hidx (hidx_type hidxs, size_t hval, size_t n):
   return 0
 
 cdef size_t _find_obj_by_hidx (hidx_type hidxs, size_t ix, size_t n,
-                               obj, proxy_list indices):
+                               obj, ProxyList indices):
   cdef size_t hval
   cdef unsigned long long data
 
@@ -1676,24 +1764,24 @@ cdef size_t _find_obj_by_hidx (hidx_type hidxs, size_t ix, size_t n,
     return ix
 
   ix -= 1
-  hval = hidxs[ix].hval
+  hval = hidxs[ix].values[0]
 
   while 1:
-    data = hidxs[ix].key_off
+    data = hidxs[ix].values[1]
     key = indices.proxy._unpack_with_data (data, indices)
 
     ix += 1
     if obj == key:
       return ix
-    elif ix == n or hidxs[ix].hval != hval:
+    elif ix == n or hidxs[ix].values[0] != hval:
       return 0
 
 ################################
 # Functions on sets.
 
-cdef inline bint _cnum_lt (cnum x, cnum y):
-  if cnum is double:
-    return _double_diff (x, y) < 0
+cdef inline bint _cnum_lt (cnum x, cnum y) noexcept:
+  if cnum is double or cnum is float:
+    return _cfloat_diff (x, y) < 0
   else:
     return x < y
 
@@ -1783,7 +1871,14 @@ cdef bint _cnum_set_includes (const void *p1, size_t l1, const void *p2,
   cdef size_t i, j
 
   if l1 == l2:
-    return memcmp (p1, p2, l1 * sizeof (elem)) == 0
+    for i in range (l1):
+      if cnum is double or cnum is float:
+        if _cfloat_diff ((<cnum *>p1)[i], (<cnum *>p2)[i]) != 0:
+          return 0
+      else:
+        if (<cnum *>p1)[i] != (<cnum *>p2)[i]:
+          return 0
+    return 1
 
   i = j = 0
   while j < l2:
@@ -1795,16 +1890,16 @@ cdef bint _cnum_set_includes (const void *p1, size_t l1, const void *p2,
 
   return 1
 
-cdef class proxy_set:
-  cdef proxy_list indices
+cdef class ProxySet:
+  cdef ProxyList indices
 
   @staticmethod
-  cdef proxy_set _make (proxy_handler proxy, size_t offset):
-    cdef proxy_set self
+  cdef ProxySet _make (Proxy proxy, size_t offset):
+    cdef ProxySet self
 
-    self = proxy_set.__new__ (proxy_set)
-    self.indices = proxy_list._make (proxy, offset, False)
-    if self.indices.code > tpcode.FLOAT:
+    self = ProxySet.__new__ (ProxySet)
+    self.indices = ProxyList._make (proxy, offset, False)
+    if not _is_inline_code (self.indices.code):
       self.indices.size >>= 1
     return self
 
@@ -1812,100 +1907,128 @@ cdef class proxy_set:
     return self.indices.size
 
   @cy.final
-  cdef set _union (self, proxy_set pset):
-    cdef proxy_list ix1, ix2
+  cdef set _union (self, ProxySet pset):
+    cdef ProxyList ix1, ix2
     cdef const unsigned char *p1
     cdef const unsigned char *p2
     cdef set out
 
     ix1, ix2 = self.indices, pset.indices
-    if ix1.code == ix2.code and ix1.code <= tpcode.FLOAT:
+    if ix1.code == ix2.code and _is_inline_code (ix1.code):
       out = set ()
       p1 = <const unsigned char *> (ix1.proxy.base + ix1.offset)
       p2 = <const unsigned char *> (ix2.proxy.base + ix2.offset)
 
-      if ix1.code == tpcode.INT:
-        _cnum_set_union[Py_ssize_t] (p1, ix1.size, p2, ix2.size, out, 0)
-      elif ix1.code == tpcode.UINT:
-        _cnum_set_union[size_t] (p1, ix1.size, p2, ix2.size, out, 0)
+      if ix1.code == tpcode.INT8:
+        _cnum_set_union[char] (p1, ix1.size, p2, ix2.size, out, 0)
+      elif ix1.code == tpcode.INT16:
+        _cnum_set_union[short] (p1, ix1.size, p2, ix2.size, out, 0)
+      elif ix1.code == tpcode.INT32:
+        _cnum_set_union[int] (p1, ix1.size, p2, ix2.size, out, 0)
+      elif ix1.code == tpcode.INT64:
+        _cnum_set_union[cy.longlong] (p1, ix1.size, p2, ix2.size, out, 0)
+      elif ix1.code == tpcode.FLOAT32:
+        _cnum_set_union[float] (p1, ix1.size, p2, ix2.size, out, 0)
       else:
         _cnum_set_union[double] (p1, ix1.size, p2, ix2.size, out, 0)
+
       return out
     else:
       return set(self).union (pset)
 
   @cy.final
-  cdef set _intersection (self, proxy_set pset):
-    cdef proxy_list ix1, ix2
+  cdef set _intersection (self, ProxySet pset):
+    cdef ProxyList ix1, ix2
     cdef const unsigned char *p1
     cdef const unsigned char *p2
     cdef set out
 
     ix1, ix2 = self.indices, pset.indices
-    if ix1.code == ix2.code and ix1.code <= tpcode.FLOAT:
+    if ix1.code == ix2.code and _is_inline_code (ix1.code):
       out = set ()
       p1 = <const unsigned char *> (ix1.proxy.base + ix1.offset)
       p2 = <const unsigned char *> (ix2.proxy.base + ix2.offset)
 
-      if ix1.code == tpcode.INT:
-        _cnum_set_intersection[Py_ssize_t] (p1, ix1.size, p2, ix2.size, out, 0)
-      elif ix1.code == tpcode.UINT:
-        _cnum_set_intersection[size_t] (p1, ix1.size, p2, ix2.size, out, 0)
+      if ix1.code == tpcode.INT8:
+        _cnum_set_intersection[char] (p1, ix1.size, p2, ix2.size, out, 0)
+      elif ix1.code == tpcode.INT16:
+        _cnum_set_intersection[short] (p1, ix1.size, p2, ix2.size, out, 0)
+      elif ix1.code == tpcode.INT32:
+        _cnum_set_intersection[int] (p1, ix1.size, p2, ix2.size, out, 0)
+      elif ix1.code == tpcode.INT64:
+        _cnum_set_intersection[cy.longlong] (p1, ix1.size, p2, ix2.size, out, 0)
+      elif ix1.code == tpcode.FLOAT32:
+        _cnum_set_intersection[float] (p1, ix1.size, p2, ix2.size, out, 0)
       else:
         _cnum_set_intersection[double] (p1, ix1.size, p2, ix2.size, out, 0)
+
       return out
     else:
       return set(self).intersection (pset)
 
   @cy.final
-  cdef set _difference (self, proxy_set pset):
-    cdef proxy_list ix1, ix2
+  cdef set _difference (self, ProxySet pset):
+    cdef ProxyList ix1, ix2
     cdef const unsigned char *p1
     cdef const unsigned char *p2
     cdef set out
 
     ix1, ix2 = self.indices, pset.indices
-    if ix1.code == ix2.code and ix1.code <= tpcode.FLOAT:
+    if ix1.code == ix2.code and _is_inline_code (ix1.code):
       out = set ()
       p1 = <const unsigned char *> (ix1.proxy.base + ix1.offset)
       p2 = <const unsigned char *> (ix2.proxy.base + ix2.offset)
 
-      if ix1.code == tpcode.INT:
-        _cnum_set_difference[Py_ssize_t] (p1, ix1.size, p2, ix2.size, out, 0)
-      elif ix1.code == tpcode.UINT:
-        _cnum_set_difference[size_t] (p1, ix1.size, p2, ix2.size, out, 0)
+      if ix1.code == tpcode.INT8:
+        _cnum_set_difference[char] (p1, ix1.size, p2, ix2.size, out, 0)
+      elif ix1.code == tpcode.INT16:
+        _cnum_set_difference[short] (p1, ix1.size, p2, ix2.size, out, 0)
+      elif ix1.code == tpcode.INT32:
+        _cnum_set_difference[int] (p1, ix1.size, p2, ix2.size, out, 0)
+      elif ix1.code == tpcode.INT64:
+        _cnum_set_difference[cy.longlong] (p1, ix1.size, p2, ix2.size, out, 0)
+      elif ix1.code == tpcode.FLOAT32:
+        _cnum_set_difference[float] (p1, ix1.size, p2, ix2.size, out, 0)
       else:
         _cnum_set_difference[double] (p1, ix1.size, p2, ix2.size, out, 0)
+
       return out
     else:
       return set(self).difference (pset)
 
   @cy.final
-  cdef set _symdiff (self, proxy_set pset):
-    cdef proxy_list ix1, ix2
+  cdef set _symdiff (self, ProxySet pset):
+    cdef ProxyList ix1, ix2
     cdef const unsigned char *p1
     cdef const unsigned char *p2
     cdef set out
 
     ix1, ix2 = self.indices, pset.indices
-    if ix1.code == ix2.code and ix1.code <= tpcode.FLOAT:
+    if ix1.code == ix2.code and _is_inline_code (ix1.code):
       out = set ()
       p1 = <const unsigned char *> (ix1.proxy.base + ix1.offset)
       p2 = <const unsigned char *> (ix2.proxy.base + ix2.offset)
 
-      if ix1.code == tpcode.INT:
-        _cnum_set_symdiff[Py_ssize_t] (p1, ix1.size, p2, ix2.size, out, 0)
-      elif ix1.code == tpcode.UINT:
-        _cnum_set_symdiff[size_t] (p1, ix1.size, p2, ix2.size, out, 0)
+      if ix1.code == tpcode.INT8:
+        _cnum_set_symdiff[char] (p1, ix1.size, p2, ix2.size, out, 0)
+      elif ix1.code == tpcode.INT16:
+        _cnum_set_symdiff[short] (p1, ix1.size, p2, ix2.size, out, 0)
+      elif ix1.code == tpcode.INT32:
+        _cnum_set_symdiff[int] (p1, ix1.size, p2, ix2.size, out, 0)
+      elif ix1.code == tpcode.INT64:
+        _cnum_set_symdiff[cy.longlong] (p1, ix1.size, p2, ix2.size, out, 0)
+      elif ix1.code == tpcode.FLOAT32:
+        _cnum_set_symdiff[float] (p1, ix1.size, p2, ix2.size, out, 0)
       else:
         _cnum_set_symdiff[double] (p1, ix1.size, p2, ix2.size, out, 0)
+
       return out
     else:
       return set(self).symmetric_difference (pset)
 
   def __contains__ (self, value):
-    cdef proxy_list indices
-    cdef proxy_handler proxy
+    cdef ProxyList indices
+    cdef Proxy proxy
     cdef unsigned int code
     cdef size_t n, ix
     cdef const array_2I *iarray
@@ -1918,11 +2041,17 @@ cdef class proxy_set:
     n = indices.size
     ptr = <const unsigned char *> (proxy.base + indices.offset)
 
-    if code == tpcode.INT:
-      return _cnum_find_sorted[Py_ssize_t] (ptr, n, value, 0, 0)
-    elif code == tpcode.UINT:
-      return _cnum_find_sorted[size_t] (ptr, n, value, 0, 0)
-    elif code == tpcode.FLOAT:
+    if code == tpcode.INT8:
+      return _cnum_find_sorted[char] (ptr, n, value, 0, 0)
+    elif code == tpcode.INT16:
+      return _cnum_find_sorted[short] (ptr, n, value, 0, 0)
+    elif code == tpcode.INT32:
+      return _cnum_find_sorted[int] (ptr, n, value, 0, 0)
+    elif code == tpcode.INT64:
+      return _cnum_find_sorted[cy.longlong] (ptr, n, value, 0, 0)
+    elif code == tpcode.FLOAT32:
+      return _cnum_find_sorted[float] (ptr, n, value, 0, 0)
+    elif code == tpcode.FLOAT64:
       return _cnum_find_sorted[double] (ptr, n, value, 0, 0)
     elif code == b"I":
       iarray = <const array_2I *>ptr
@@ -1942,18 +2071,15 @@ cdef class proxy_set:
     code = self.indices.code
     ptr = self.indices.proxy.base + self.indices.offset
 
-    for i in range (self.indices.size):
-      if code == tpcode.INT:
-        yield (<Py_ssize_t *>ptr)[i]
-      elif code == tpcode.UINT:
-        yield (<size_t *>ptr)[i]
-      elif code == tpcode.FLOAT:
-        yield (<double *>ptr)[i]
-      else:
+    if _is_inline_code (code):
+      for i in range (self.indices.size):
+        yield _builtin_read (ptr, i, code)
+    else:
+      for i in range (self.indices.size):
         if code == b"I":
-          data = (<const array_2I *>ptr)[i].key_off
+          data = (<const array_2I *>ptr)[i].values[1]
         else:
-          data = (<const array_2Q *>ptr)[i].key_off
+          data = (<const array_2Q *>ptr)[i].values[1]
 
         yield self.indices.proxy._unpack_with_data (data, self.indices)
 
@@ -1962,8 +2088,8 @@ cdef class proxy_set:
       return self
     elif len (args) == 1:
       tmp = args[0]
-      if isinstance (tmp, proxy_set):
-        return self._union (<proxy_set>tmp)
+      if isinstance (tmp, ProxySet):
+        return self._union (<ProxySet>tmp)
     return set(self).union (*args)
 
   def intersection (self, *args):
@@ -1971,8 +2097,8 @@ cdef class proxy_set:
       return self
     elif len (args) == 1:
       tmp = args[0]
-      if isinstance (tmp, proxy_set):
-        return self._intersection (<proxy_set>tmp)
+      if isinstance (tmp, ProxySet):
+        return self._intersection (<ProxySet>tmp)
     return set(self).intersection (*args)
 
   def difference (self, *args):
@@ -1980,8 +2106,8 @@ cdef class proxy_set:
       return self
     elif len (args) == 1:
       tmp = args[0]
-      if isinstance (tmp, proxy_set):
-        return self._difference (<proxy_set>tmp)
+      if isinstance (tmp, ProxySet):
+        return self._difference (<ProxySet>tmp)
     return set(self).difference (*args)
 
   def symmetric_difference (self, *args):
@@ -1989,17 +2115,17 @@ cdef class proxy_set:
       return self
     elif len (args) == 1:
       tmp = args[0]
-      if isinstance (tmp, proxy_set):
-        return self._symdiff (<proxy_set>tmp)
+      if isinstance (tmp, ProxySet):
+        return self._symdiff (<ProxySet>tmp)
     return set(self).symmetric_difference (*args)
 
   def __and__ (self, x):
-    cdef proxy_set this
+    cdef ProxySet this
 
-    if isinstance (self, proxy_set):
-      this = <proxy_set>self
-      if isinstance (x, proxy_set):
-        return this._intersection (<proxy_set>x)
+    if isinstance (self, ProxySet):
+      this = <ProxySet>self
+      if isinstance (x, ProxySet):
+        return this._intersection (<ProxySet>x)
       return set(this).intersection (x)
     elif not isinstance (self, (set, frozenset)):
       raise TypeError ("cannot compute intersection between %r and %r" %
@@ -2007,12 +2133,12 @@ cdef class proxy_set:
     return self.intersection (set (x))
 
   def __or__ (self, x):
-    cdef proxy_set this
+    cdef ProxySet this
 
-    if isinstance (self, proxy_set):
-      this = <proxy_set>self
-      if isinstance (x, proxy_set):
-        return this._union (<proxy_set>x)
+    if isinstance (self, ProxySet):
+      this = <ProxySet>self
+      if isinstance (x, ProxySet):
+        return this._union (<ProxySet>x)
       return set(this).union (x)
     elif not isinstance (self, (set, frozenset)):
       raise TypeError ("cannot compute union between %r and %r" %
@@ -2020,12 +2146,12 @@ cdef class proxy_set:
     return self.union (set (x))
 
   def __sub__ (self, x):
-    cdef proxy_set this
+    cdef ProxySet this
 
-    if isinstance (self, proxy_set):
-      this = <proxy_set>self
-      if isinstance (x, proxy_set):
-        return this._difference (<proxy_set>x)
+    if isinstance (self, ProxySet):
+      this = <ProxySet>self
+      if isinstance (x, ProxySet):
+        return this._difference (<ProxySet>x)
       return set(this).difference (x)
     elif not isinstance (self, (set, frozenset)):
       raise TypeError ("cannot compute difference between %r and %r" %
@@ -2033,12 +2159,12 @@ cdef class proxy_set:
     return self.difference (set (x))
 
   def __xor__ (self, x):
-    cdef proxy_set this
+    cdef ProxySet this
 
-    if isinstance (self, proxy_set):
-      this = <proxy_set>self
-      if isinstance (x, proxy_set):
-        return this._symdiff (<proxy_set>x)
+    if isinstance (self, ProxySet):
+      this = <ProxySet>self
+      if isinstance (x, ProxySet):
+        return this._symdiff (<ProxySet>x)
       return set(this).symmetric_difference (x)
     elif not isinstance (self, (set, frozenset)):
       raise TypeError ("cannot compute symmetric difference between %r and %r" %
@@ -2046,18 +2172,18 @@ cdef class proxy_set:
     return self.symmetric_difference (set (x))
 
   cdef bint _eq (self, x):
-    cdef proxy_set ps
-    cdef proxy_list ix1, ix2
+    cdef ProxySet ps
+    cdef ProxyList ix1, ix2
 
-    if (self.indices.code <= tpcode.FLOAT and isinstance (x, proxy_set) and
-        (<proxy_set>x).indices.code == self.indices.code):
-      ps = <proxy_set>x
+    if (_is_inline_code (self.indices.code) and isinstance (x, ProxySet) and
+        (<ProxySet>x).indices.code == self.indices.code):
+      ps = <ProxySet>x
       ix1, ix2 = self.indices, ps.indices
       return (ps.indices.size == self.indices.size and
               memcmp (ix1.proxy.base + ix1.offset, ix2.proxy.base + ix2.offset,
                       ix1.size * sizeof (size_t)) == 0)
 
-    if not isinstance (x, (set, frozenset, proxy_set)) or len (x) != len (self):
+    if not isinstance (x, (set, frozenset, ProxySet)) or len (x) != len (self):
       return False
     for elem in self:
       if elem not in x:
@@ -2065,36 +2191,42 @@ cdef class proxy_set:
     return True
 
   def __eq__ (self, x):
-    if isinstance (self, proxy_set):
-      return (<proxy_set>self)._eq (x)
-    return (<proxy_set>x)._eq (self)
+    if isinstance (self, ProxySet):
+      return (<ProxySet>self)._eq (x)
+    return (<ProxySet>x)._eq (self)
 
   cdef bint _subset (self, x, bint lt):
     cdef bint ret
-    cdef proxy_list ix1, ix2
+    cdef ProxyList ix1, ix2
     cdef const void *p1
     cdef const void *p2
 
-    if (self.indices.code <= tpcode.FLOAT and
-        isinstance (x, proxy_set) and
-        (<proxy_set>x).indices.code == self.indices.code):
-      ix1, ix2 = self.indices, (<proxy_set>x).indices
+    if (_is_inline_code (self.indices.code) and
+        isinstance (x, ProxySet) and
+        (<ProxySet>x).indices.code == self.indices.code):
+      ix1, ix2 = self.indices, (<ProxySet>x).indices
       p1 = <const void *> (ix1.proxy.base + ix1.offset)
       p2 = <const void *> (ix2.proxy.base + ix2.offset)
 
       if ix1.size > ix2.size:
         ret = False
-      elif self.indices.code == tpcode.INT:
-        ret = _cnum_set_includes[Py_ssize_t] (p2, ix2.size, p1, ix1.size, 0)
-      elif self.indices.code == tpcode.UINT:
-        ret = _cnum_set_includes[size_t] (p2, ix2.size, p1, ix1.size, 0)
+      elif self.indices.code == tpcode.INT8:
+        ret = _cnum_set_includes[char] (p2, ix2.size, p1, ix1.size, 0)
+      elif self.indices.code == tpcode.INT16:
+        ret = _cnum_set_includes[short] (p2, ix2.size, p1, ix1.size, 0)
+      elif self.indices.code == tpcode.INT32:
+        ret = _cnum_set_includes[int] (p2, ix2.size, p1, ix1.size, 0)
+      elif self.indices.code == tpcode.INT64:
+        ret = _cnum_set_includes[cy.longlong] (p2, ix2.size, p1, ix1.size, 0)
+      elif self.indices.code == tpcode.FLOAT32:
+        ret = _cnum_set_includes[float] (p2, ix2.size, p1, ix1.size, 0)
       else:
         ret = _cnum_set_includes[double] (p2, ix2.size, p1, ix1.size, 0)
 
       if lt:
         ret = ret and ix1.size < ix2.size
 
-    elif (not isinstance (x, (set, frozenset, proxy_set)) or
+    elif (not isinstance (x, (set, frozenset, ProxySet)) or
           len (self) > len (x)):
       ret = False
     else:
@@ -2110,14 +2242,14 @@ cdef class proxy_set:
     return ret
 
   def __lt__ (self, x):
-    if isinstance (self, proxy_set):
-      return (<proxy_set>self)._subset (x, True)
-    return (<proxy_set>x)._subset (self, True)
+    if isinstance (self, ProxySet):
+      return (<ProxySet>self)._subset (x, True)
+    return (<ProxySet>x)._subset (self, True)
 
   def __le__ (self, x):
-    if isinstance (self, proxy_set):
-      return (<proxy_set>self)._subset (x, False)
-    return (<proxy_set>x)._subset (self, False)
+    if isinstance (self, ProxySet):
+      return (<ProxySet>self)._subset (x, False)
+    return (<ProxySet>x)._subset (self, False)
 
   def __gt__ (self, x):
     return x < self
@@ -2129,7 +2261,7 @@ cdef class proxy_set:
     return "{%s}" % ",".join ([str (x) for x in self])
 
   def __repr__ (self):
-    return "proxy_set(%s)" % self
+    return "ProxySet(%s)" % self
 
   @cy.final
   cdef _toset (self):
@@ -2141,34 +2273,34 @@ cdef class proxy_set:
 
 ########################################
 
-cdef inline object _proxy_dict_iter_key (hidx_type hidxs, size_t ix, iobj):
-  cdef proxy_list indices
+cdef inline object _ProxyDict_iter_key (hidx_type hidxs, size_t ix, iobj):
+  cdef ProxyList indices
 
-  indices = <proxy_list>iobj
-  return indices.proxy._unpack_with_data (hidxs[ix].key_off, indices)
+  indices = <ProxyList>iobj
+  return indices.proxy._unpack_with_data (hidxs[ix].values[1], indices)
 
-cdef inline object _proxy_dict_iter_val (hidx_type hidxs, size_t ix, iobj):
-  cdef proxy_list indices
+cdef inline object _ProxyDict_iter_val (hidx_type hidxs, size_t ix, iobj):
+  cdef ProxyList indices
 
-  indices = <proxy_list>iobj
-  return indices.proxy._unpack_with_data (hidxs[ix].val_off, indices)
+  indices = <ProxyList>iobj
+  return indices.proxy._unpack_with_data (hidxs[ix].values[2], indices)
 
-cdef inline object _proxy_dict_iter_both (hidx_type hidxs, size_t ix, iobj):
-  cdef proxy_list indices
+cdef inline object _ProxyDict_iter_both (hidx_type hidxs, size_t ix, iobj):
+  cdef ProxyList indices
 
-  indices = <proxy_list>iobj
-  return (indices.proxy._unpack_with_data (hidxs[ix].key_off, indices),
-          indices.proxy._unpack_with_data (hidxs[ix].val_off, indices))
+  indices = <ProxyList>iobj
+  return (indices.proxy._unpack_with_data (hidxs[ix].values[1], indices),
+          indices.proxy._unpack_with_data (hidxs[ix].values[2], indices))
 
-cdef class proxy_dict:
-  cdef proxy_list indices
+cdef class ProxyDict:
+  cdef ProxyList indices
 
   @staticmethod
-  cdef proxy_dict _make (proxy_handler proxy, size_t offset):
-    cdef proxy_dict self
+  cdef ProxyDict _make (Proxy proxy, size_t offset):
+    cdef ProxyDict self
 
-    self = proxy_dict.__new__ (proxy_dict)
-    self.indices = proxy_list._make (proxy, offset, False)
+    self = ProxyDict.__new__ (ProxyDict)
+    self.indices = ProxyList._make (proxy, offset, False)
     self.indices.size //= 3
     return self
 
@@ -2177,8 +2309,8 @@ cdef class proxy_dict:
 
   @cy.final
   cdef object _c_get (self, key, dfl):
-    cdef proxy_list indices
-    cdef proxy_handler proxy
+    cdef ProxyList indices
+    cdef Proxy proxy
     cdef size_t n, ix
     cdef const array_3I *iarray
     cdef const array_3Q *qarray
@@ -2192,13 +2324,13 @@ cdef class proxy_dict:
       ix = _find_hidx (iarray, _xhash (key, proxy.hash_seed), n)
       ix = _find_obj_by_hidx (iarray, ix, n, key, indices)
       if ix != 0:
-        return proxy._unpack_with_data (iarray[ix - 1].val_off, indices)
+        return proxy._unpack_with_data (iarray[ix - 1].values[2], indices)
     else:
       qarray = <const array_3Q *> (proxy.base + indices.offset)
       ix = _find_hidx (qarray, _xhash (key, proxy.hash_seed), n)
       ix = _find_obj_by_hidx (qarray, ix, n, key, indices)
       if ix != 0:
-        return proxy._unpack_with_data (qarray[ix - 1].val_off, indices)
+        return proxy._unpack_with_data (qarray[ix - 1].values[2], indices)
 
     return dfl
 
@@ -2217,7 +2349,7 @@ cdef class proxy_dict:
   def _iter_impl (self, size_t wfn):
     cdef dict_iter_fn fn
     cdef size_t i
-    cdef proxy_list indices
+    cdef ProxyList indices
 
     indices = self.indices
     fn = fn_caster(wfn).bfn
@@ -2229,43 +2361,43 @@ cdef class proxy_dict:
     cdef fn_caster caster
 
     if self.indices.code == b"I":
-      caster.bfn = <dict_iter_fn>_proxy_dict_iter_key["const array_3I*"]
+      caster.bfn = <dict_iter_fn>_ProxyDict_iter_key["const array_3I*"]
     else:
-      caster.bfn = <dict_iter_fn>_proxy_dict_iter_key["const array_3Q*"]
+      caster.bfn = <dict_iter_fn>_ProxyDict_iter_key["const array_3Q*"]
     return self._iter_impl (caster.wfn)
 
   def values (self):
     cdef fn_caster caster
 
     if self.indices.code == b"I":
-      caster.bfn = <dict_iter_fn>_proxy_dict_iter_val["const array_3I*"]
+      caster.bfn = <dict_iter_fn>_ProxyDict_iter_val["const array_3I*"]
     else:
-      caster.bfn = <dict_iter_fn>_proxy_dict_iter_val["const array_3Q*"]
+      caster.bfn = <dict_iter_fn>_ProxyDict_iter_val["const array_3Q*"]
     return self._iter_impl (caster.wfn)
 
   def items (self):
     cdef fn_caster caster
 
     if self.indices.code == b"I":
-      caster.bfn = <dict_iter_fn>_proxy_dict_iter_both["const array_3I*"]
+      caster.bfn = <dict_iter_fn>_ProxyDict_iter_both["const array_3I*"]
     else:
-      caster.bfn = <dict_iter_fn>_proxy_dict_iter_both["const array_3Q*"]
+      caster.bfn = <dict_iter_fn>_ProxyDict_iter_both["const array_3Q*"]
     return self._iter_impl (caster.wfn)
 
   @cy.final
   cdef _todict (self):
     cdef dict_iter_fn kget, vget
-    cdef proxy_list indices
+    cdef ProxyList indices
     cdef void *ptr
 
     rv = {}
     unproxy_ = unproxy
     if self.indices.code == b"I":
-      kget = <dict_iter_fn>_proxy_dict_iter_key["const array_3I*"]
-      vget = <dict_iter_fn>_proxy_dict_iter_val["const array_3I*"]
+      kget = <dict_iter_fn>_ProxyDict_iter_key["const array_3I*"]
+      vget = <dict_iter_fn>_ProxyDict_iter_val["const array_3I*"]
     else:
-      kget = <dict_iter_fn>_proxy_dict_iter_key["const array_3Q*"]
-      vget = <dict_iter_fn>_proxy_dict_iter_val["const array_3Q*"]
+      kget = <dict_iter_fn>_ProxyDict_iter_key["const array_3Q*"]
+      vget = <dict_iter_fn>_ProxyDict_iter_val["const array_3Q*"]
 
     indices = self.indices
     ptr = indices.proxy.base + indices.offset
@@ -2297,138 +2429,63 @@ cdef class proxy_dict:
     return "{%s}" % ", ".join (["%r: %r" % (k, v) for k, v in self.items ()])
 
   def __repr__ (self):
-    return "proxy_dict(%s)" % self
+    return "ProxyDict(%s)" % self
 
 #####################################
 
-cdef inline cnum _descr_get_cnum (proxy_handler proxy,
-                                  size_t offset, cnum elem):
-  if proxy.rdwr:
-    atomic_fence ()
-  return (<const cnum *> (proxy.base + offset))[0]
-
-cdef inline _descr_set_cnum (proxy_handler proxy,
-                             size_t offset, cnum value):
-  if not proxy.rdwr:
-    raise TypeError ("cannot modify attribute of read-only object")
-  (<cnum *> (proxy.base + offset))[0] = value
-  atomic_fence ()
-
-cdef class proxy_descr_int:
-  cdef size_t offset
-  cdef proxy_handler proxy
+cdef class ProxyDescrBuiltin:
+  cdef void *ptr
+  cdef unsigned int code
+  cdef Proxy proxy
 
   @staticmethod
-  cdef proxy_descr_int _make (size_t offset, proxy_handler proxy):
-    cdef proxy_descr_int ret
+  cdef ProxyDescrBuiltin _make (size_t offset, Proxy proxy,
+                              unsigned int code):
+    cdef ProxyDescrBuiltin ret
+    cdef size_t size
 
-    ret = proxy_descr_int.__new__ (proxy_descr_int)
-    ret.offset = offset + _get_padding (offset, sizeof (Py_ssize_t))
+    ret = ProxyDescrBuiltin.__new__ (ProxyDescrBuiltin)
+    size = _BASIC_SIZES[code]
+    offset = offset + _get_padding (offset, size)
     ret.proxy = proxy
-    ret.proxy._assert_len (ret.offset + sizeof (Py_ssize_t))
+    ret.proxy._assert_len (offset + size)
+    ret.ptr = proxy.base + offset
+    ret.code = code
     return ret
 
   def __get__ (self, obj, cls):
     if obj is None:
       return self
+    elif self.proxy.rdwr:
+      atomic_fence ()
 
-    return _descr_get_cnum[Py_ssize_t] (self.proxy, self.offset, 0)
+    return _builtin_read (self.ptr, 0, self.code)
+
+  def _assert_writable (self):
+    if not self.proxy.rdwr:
+      raise TypeError ("cannot modify attribute of read-only object")
 
   def __set__ (self, obj, value):
-    _descr_set_cnum[Py_ssize_t] (self.proxy, self.offset, value)
+    self._assert_writable ()
+    _builtin_write (self.ptr, 0, value, self.code)
 
   def add (self, value):
-    if not self.proxy.rdwr:
-      raise TypeError ("cannot modify attribute of read-only object")
-    return atomic_add_i (self.proxy.base + self.offset, value)
+    self._assert_writable ()
+    return _builtin_aadd (self.ptr, 0, value, self.code)
 
   def cas (self, exp, nval):
-    if not self.proxy.rdwr:
-      raise TypeError ("cannot modify attribute of read-only object")
-    if atomic_cas_i (self.proxy.base + self.offset, exp, nval) == 1:
-      return True
-    return False
+    self._assert_writable ()
+    return _builtin_acas (self.ptr, 0, exp, nval, self.code)
 
-cdef class proxy_descr_uint:
-  cdef size_t offset
-  cdef proxy_handler proxy
-
-  @staticmethod
-  cdef proxy_descr_uint _make (size_t offset, proxy_handler proxy):
-    cdef proxy_descr_uint ret
-
-    ret = proxy_descr_uint.__new__ (proxy_descr_uint)
-    ret.offset = offset + _get_padding (offset, sizeof (size_t))
-    ret.proxy = proxy
-    ret.proxy._assert_len (ret.offset + sizeof (size_t))
-    return ret
-
-  def __get__ (self, obj, cls):
-    if obj is None:
-      return self
-
-    return _descr_get_cnum[size_t] (self.proxy, self.offset, 0)
-
-  def __set__ (self, obj, value):
-    _descr_set_cnum[size_t] (self.proxy, self.offset, value)
-
-  def add (self, value):
-    if not self.proxy.rdwr:
-      raise TypeError ("cannot modify attribute of read-only object")
-    return atomic_add_I (self.proxy.base + self.offset, value)
-
-  def cas (self, exp, nval):
-    if not self.proxy.rdwr:
-      raise TypeError ("cannot modify attribute of read-only object")
-    if atomic_cas_I (self.proxy.base + self.offset, exp, nval) == 1:
-      return True
-    return False
-
-cdef class proxy_descr_float:
-  cdef size_t offset
-  cdef proxy_handler proxy
-
-  @staticmethod
-  cdef proxy_descr_float _make (size_t offset, proxy_handler proxy):
-    cdef proxy_descr_float ret
-
-    ret = proxy_descr_float.__new__ (proxy_descr_float)
-    ret.offset = offset + _get_padding (offset, sizeof (double))
-    ret.proxy = proxy
-    ret.proxy._assert_len (ret.offset + sizeof (double))
-    return ret
-
-  def __get__ (self, obj, cls):
-    if obj is None:
-      return self
-
-    return _descr_get_cnum[double] (self.proxy, self.offset, 0)
-
-  def __set__ (self, obj, value):
-    _descr_set_cnum[double] (self.proxy, self.offset, value)
-
-  def add (self, value):
-    if not self.proxy.rdwr:
-      raise TypeError ("cannot modify attribute of read-only object")
-
-    return atomic_add_f (self.proxy.base + self.offset, value)
-
-  def cas (self, exp, nval):
-    if not self.proxy.rdwr:
-      raise TypeError ("cannot modify attribute of read-only object")
-    if atomic_cas_f (self.proxy.base + self.offset, exp, nval) == 1:
-      return True
-    return False
-
-cdef class proxy_descr_any:
+cdef class ProxyDescrAny:
   cdef unsigned long long data
-  cdef proxy_handler proxy
+  cdef Proxy proxy
 
   @staticmethod
-  cdef proxy_descr_any _make (unsigned long long data, proxy_handler proxy):
-    cdef proxy_descr_any ret
+  cdef ProxyDescrAny _make (unsigned long long data, Proxy proxy):
+    cdef ProxyDescrAny ret
 
-    ret = proxy_descr_any.__new__ (proxy_descr_any)
+    ret = ProxyDescrAny.__new__ (ProxyDescrAny)
     ret.data = data
     ret.proxy = proxy
     return ret
@@ -2437,28 +2494,25 @@ cdef class proxy_descr_any:
     if obj is None:
       return self
 
-    return self.proxy._unpack_with_code (self.data >> 5, self.data & 0x1f)
+    return self.proxy._unpack_with_code (self.data >> _OFF_SHIFT,
+                                         self.data & _CODE_MASK)
 
-cdef object _make_descr (proxy_handler proxy, size_t base,
+cdef object _make_descr (Proxy proxy, size_t base,
                          unsigned long long data):
   cdef unsigned int code
 
-  code = data & 0x1f
-  if code == tpcode.INT:
-    return proxy_descr_int._make (base + (data >> 5), proxy)
-  elif code == tpcode.UINT:
-    return proxy_descr_uint._make (base + (data >> 5), proxy)
-  elif code == tpcode.FLOAT:
-    return proxy_descr_float._make (base + (data >> 5), proxy)
+  code = data & _CODE_MASK
+  if _is_inline_code (code):
+    return ProxyDescrBuiltin._make (base + (data >> _OFF_SHIFT), proxy, code)
   else:
-    data = ((base + (data >> 5)) << 5) | code
-    return proxy_descr_any._make (data, proxy)
+    data = ((base + (data >> _OFF_SHIFT)) << _OFF_SHIFT) | code
+    return ProxyDescrAny._make (data, proxy)
 
-cdef inline str _decode_str (proxy_handler proxy, size_t off, size_t size):
+cdef inline str _decode_str (Proxy proxy, size_t off, size_t size):
   proxy._assert_len (off + size)
   return PyUnicode_FromStringAndSize (proxy.base + off, size)
 
-cdef object _read_type (proxy_handler proxy, size_t *offp):
+cdef object _read_type (Proxy proxy, size_t *offp):
   cdef size_t off, size
   cdef str path, md
   cdef unsigned int md_len
@@ -2492,7 +2546,7 @@ cdef object _read_type (proxy_handler proxy, size_t *offp):
   offp[0] = off + size
   return typ
 
-cdef object _proxy_obj (proxy_handler proxy, size_t off):
+cdef object _proxy_obj (Proxy proxy, size_t off):
   cdef unsigned int wide, i_size, klen
   cdef size_t base, i, saved, size
   cdef void *ptr
@@ -2529,7 +2583,7 @@ cdef object _proxy_obj (proxy_handler proxy, size_t off):
       descrs[name] = _make_descr (proxy, saved, ioffs[i + 1])
       base += ioffs[i]
 
-  typ = type ("proxy_object", (typ,), descrs)
+  typ = type ("ProxyObject", (typ,), descrs)
   return typ.__new__ (typ)
 
 def _register_impl (typ, ix, fn):
@@ -2559,7 +2613,7 @@ def register_unpack (typ):
 
 cdef object _dispatch_type_impl (dict packers, typ, unsigned int ix):
   cdef list flist, val
-  cdef Py_ssize_t dist
+  cdef size_t dist
 
   flist = packers.get (typ)
   if flist:
@@ -2567,7 +2621,7 @@ cdef object _dispatch_type_impl (dict packers, typ, unsigned int ix):
     if rv:
       return rv
 
-  dist = _MAX_DISTANCE
+  dist = ~(<size_t>0)
   fn = None
 
   for key, val in _custom_packers.items ():
@@ -2588,11 +2642,11 @@ cdef object _dispatch_type (typ, unsigned int ix):
 def pack (obj, **kwargs):
   """
   Return a bytearray with the serialized representation of ``obj``.
-  The keyword arguments are the same as those used in ``packer.__init__``.
+  The keyword arguments are the same as those used in ``Packer.__init__``.
   """
-  cdef packer p
+  cdef Packer p
 
-  p = packer (**kwargs)
+  p = Packer (**kwargs)
   p.pack (obj)
   return p.as_bytearray ()
 
@@ -2610,7 +2664,7 @@ def pack_into (obj, place, offset = None, **kwargs):
     If None, the object will be serialized at the destination's current
     position, if it applies.
 
-  See ``packer.__init__`` for information about the supported keyword args.
+  See ``Packer.__init__`` for information about the supported keyword args.
   """
   cdef bytearray b, bp
 
@@ -2653,22 +2707,22 @@ def unpack_from (place, offset = 0, **kwargs):
   Unpack an object from an input source from a specified object.
 
   :param place: The source object from which to unpack. Can be any object
-    with which a ``proxy_handler`` can be built.
+    with which a ``Proxy`` can be built.
 
   :param int offset *(default 0)*: The offset inside the source at which
     to unpack.
 
-  See ``proxy_handler.__init__`` for information about the supported
+  See ``Proxy.__init__`` for information about the supported
     keyword args.
   """
-  return proxy_handler(place, offset, **kwargs).unpack ()
+  return Proxy(place, offset, **kwargs).unpack ()
 
 def unpack_as (place, code, offset = 0, **kwargs):
   """
   Unpack an object from an input source using a specific type and offset.
 
   :param place: The source object from which to unpack. Can be any object
-    with which a ``proxy_handler`` can be built.
+    with which a ``Proxy`` can be built.
 
   :param int code: The typecode of the object to unpack. Must be one of
     the TYPE_* constants defined in this module.
@@ -2676,30 +2730,33 @@ def unpack_as (place, code, offset = 0, **kwargs):
   :param int offset *(default 0)*: The offset inside the source at which
     to unpack.
 
-  See ``proxy_handler.__init__`` for information about the supported
+  See ``Proxy.__init__`` for information about the supported
     keyword args.
   """
-  return proxy_handler(place, 0, **kwargs).unpack_as (code, offset)
+  return Proxy(place, 0, **kwargs).unpack_as (code, offset)
 
 def unproxy (obj):
   """
   Convert any proxied object into its materialized counterpart, recursively.
-  i.e: a proxy_list is turned into a regular Python list.
+  i.e: a ProxyList is turned into a regular Python list.
   """
-  if isinstance (obj, proxy_str):
-    return _PyUnicode_Copy ((<proxy_str>obj).uobj)
-  elif isinstance (obj, proxy_set):
-    return (<proxy_set>obj)._toset ()
-  elif isinstance (obj, proxy_dict):
-    return (<proxy_dict>obj)._todict ()
-  elif isinstance (obj, proxy_list):
-    return (<proxy_list>obj)._unproxy ()
+  if isinstance (obj, ProxyStr):
+    return _PyUnicode_Copy ((<ProxyStr>obj).uobj)
+  elif isinstance (obj, ProxySet):
+    return (<ProxySet>obj)._toset ()
+  elif isinstance (obj, ProxyDict):
+    return (<ProxyDict>obj)._todict ()
+  elif isinstance (obj, ProxyList):
+    return (<ProxyList>obj)._unproxy ()
   return obj
 
 # Exported typecodes for the 'unpack_as' functions.
-TYPE_INT = tpcode.INT
-TYPE_UINT = tpcode.UINT
-TYPE_FLOAT = tpcode.FLOAT
+TYPE_INT8 = tpcode.INT8
+TYPE_INT16 = tpcode.INT16
+TYPE_INT32 = tpcode.INT8
+TYPE_INT64 = tpcode.INT16
+TYPE_FLOAT32 = tpcode.FLOAT32
+TYPE_FLOAT64 = tpcode.FLOAT64
 TYPE_BIGINT = tpcode.NUM
 TYPE_STR = tpcode.STR
 TYPE_BYTES = tpcode.BYTES
