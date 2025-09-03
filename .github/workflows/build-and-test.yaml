@@ -29,7 +29,7 @@ jobs:
           else
             sudo python3 -m ensurepip --upgrade || true
             brew install pytest cython python-setuptools
-            pip install Cython
+            pip install --break-system-packages Cython
           fi
 
       - name: Build and install library
