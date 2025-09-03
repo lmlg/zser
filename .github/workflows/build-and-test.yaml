@@ -15,6 +15,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, ubuntu-24.04, ubuntu-22.04,
              ubuntu-24.04-arm, macos-latest, macos-14]
+        fail-fast: false
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
@@ -26,7 +27,6 @@ jobs:
             sudo apt update
             sudo apt install -y python3-pytest cython3
           else
-            sudo xcode-select --install
             sudo python3 -m ensurepip --upgrade
             sudo pip3 install pytest Cython
           fi
