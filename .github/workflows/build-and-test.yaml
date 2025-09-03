@@ -1,5 +1,13 @@
 name: Build/Test
 
+on:
+  workflow_call:
+  workflow_dispatch:
+    inputs:
+      part:
+        required: false
+        default: ''
+
 jobs:
   build:
     name: Build the library and run tests
