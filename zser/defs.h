@@ -27,6 +27,11 @@ STR_NEW (unsigned int code, size_t len, const void *ptr)
   b->length = len;
   b->hash = -1;
   b->state.compact = 0;
+
+#if PY_MINOR_VERSION <= 11
+  b->state.ready = 1;
+#endif
+
   b->state.interned = 0;   // SSTATE_NOT_INTERNED
   if (code == 3)
     {
@@ -39,6 +44,14 @@ STR_NEW (unsigned int code, size_t len, const void *ptr)
     {
       b->state.ascii = 0;
       b->state.kind = code;
+
+#if PY_MINOR_VERSION <= 11
+      if (code == sizeof (wchar_t))
+        {
+          b->wstr = (wchar_t *)p->data.any;
+          c->wstr_length = b->length;
+        }
+#endif
     }
 
   return ((PyObject *)p);
@@ -52,6 +65,9 @@ STR_FINI (PyObject *obj)
   PyUnicodeObject *p = (PyUnicodeObject *)obj;
   p->data.any = NULL;
   p->_base.utf8 = NULL;
+#if PY_MINOR_VERSION <= 11
+  p->_base._base.wstr = NULL;
+#endif
 }
 
 static int

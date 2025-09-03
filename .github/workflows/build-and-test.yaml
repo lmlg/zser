@@ -1,0 +1,43 @@
+name: Build/Test
+
+on:
+  workflow_call:
+  workflow_dispatch:
+    inputs:
+      part:
+        required: false
+        default: ''
+
+jobs:
+  build:
+    name: Build the library and run tests
+    strategy:
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04, ubuntu-22.04, ubuntu-24.04-arm]
+      fail-fast: false
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          if [[ "${{ matrix.os }}" =~ "ubuntu" ]]; then
+            sudo apt update
+            sudo apt install -y python3-pytest cython3
+          else
+            brew install pytest python-setuptools
+            git clone --single-branch --branch 3.1.x https://github.com/cython/cython.git
+            cd cython
+            sudo python3 setup.py install
+            cd ..
+          fi
+
+      - name: Build and install library
+        run: |
+          python3 setup.py build_ext
+          sudo python3 setup.py install
+
+      - name: Run tests
+        run: |
+          pytest-3 .

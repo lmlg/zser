@@ -1,8 +1,8 @@
 ## *zser* --- Fast, zero-copy serialization
 
-This library allows users to pack arbitrary objects into a binary
-representation, and to unpack them a bit differently than typical serialization
-libraries: Instead of returning the original object, **zser** returns an object
+This library allows users to pack arbitrary objects into a binary stream,
+and to unpack them a bit differently than typical serialization libraries:
+Instead of returning the original object, **zser** returns an object
 that masquerades it, implementing the same interface (with a few caveats), but
 using far less resources (i.e: time and memory) to perform this unpacking.
 
@@ -13,7 +13,7 @@ When manipulating objects, these are split into two kinds: Primitives, which
 are stored inline and retrieved as such, like most serialization libraries do.
 Primitives include numeric types like **int** and **float**.
 
-The other kind, compund objects, work a bit differently. When unpacking them,
+The other kind, compound objects, work a bit differently. When unpacking them,
 an indirect object (or **proxy**) is returned, which is what makes this operation
 fast. Proxy objects act as lazy containers, and their underlying sub-objects
 are recreated on demand, instead of upfront. We strive to support the same
@@ -38,13 +38,13 @@ packed, but rather a proxy object. The mapping table is thus:
 
 |  Python type   |   Proxy type    |
 |:--------------:|:---------------:|
-| list           |   proxy_list    |
-| tuple          |   proxy_list    |
-| str            |   proxy_str     |
-| set            |   proxy_set     |
-| frozenset      |   proxy_set     |
-| dict           |   proxy_dict    |
-| other          |   proxy_object  |
+| list           |   ProxyList     |
+| tuple          |   ProxyList     |
+| str            |   ProxyStr      |
+| set            |   ProxySet      |
+| frozenset      |   ProxySet      |
+| dict           |   ProxyDict     |
+| other          |   ProxyObject   |
 
 ## Portability
 
@@ -57,7 +57,7 @@ example, binary files _should_ be shareable between x86-64 and aarch64 systems.
 ## Classes
 
 ```python
-class packer (offset = 0, id_cache = None, hash_seed = 0,
+class Packer (offset = 0, id_cache = None, hash_seed = 0,
               custom_packers = None, initial_size = 8, import_key = None)
 ```
 
@@ -66,7 +66,8 @@ class packer (offset = 0, id_cache = None, hash_seed = 0,
   written into output objects. The constructor parameters are as following:
 
   * offset: The starting offset at which the objects will be serialized in the output.
-  * id_cache: A dictionary that maps objects id to offsets. Necessary to correctly serialize              cyclical objects.
+  * id_cache: A dictionary that maps objects id to offsets. Necessary to correctly serialize
+              cyclical objects.
   * hash_seed: An integer that is used to mix the hash values of the serialized objects
                when needed. This can be used in order to prevent malicious users from
                generating pathological cases with hand-crafted hash values.
@@ -142,12 +143,12 @@ class packer (offset = 0, id_cache = None, hash_seed = 0,
   Packs an object into the packer's stream. If _tag_ is true, also emits the typecode.
 
 ```python
-class proxy_handler (mapping, offset = 0, size = None, rw = False,
-                     hash_seed = 0, verify_str = False, import_key = None)
+class Proxy (mapping, offset = 0, size = None, rw = False,
+             hash_seed = 0, verify_str = False, import_key = None)
 ```
 
   Returns an object that manages a mapping so that objects can be deserialized out of it.
-  A proxy_handler is responsible for creating all the proxy objects out of mappings.
+  A Proxy is responsible for creating all the proxy objects out of mappings.
   Its constructor parameters are as following:
 
   * mapping: The object that backs the mapping. If this object has a _fileno_ method, this
@@ -160,21 +161,21 @@ class proxy_handler (mapping, offset = 0, size = None, rw = False,
   * rw: Whether the mapping is read-write. If _True_, and the mapping supports it, some
         mutations will be allowed. If _True_, but the mapping doesn't support it, a
         **BufferError** will be raised.
-  * hash_seed, import_key: See the **packer** constructor for details.
+  * hash_seed, import_key: See the **Packer** constructor for details.
   * verify_str: Whether to check for strings' consistency when unpacking them.
   
   ```python
     __len__ ()
   ```
 
-  Returns the proxy_handler's mapping size.
+  Returns the Proxy's mapping size.
 
   ```python
     __getbuffer__ (buf, flags)
     __releasebuffer__ (buf)
   ```
 
-  Buffer interface implementation for proxy_handlers.
+  Buffer interface implementation for Proxy.
 
   ```python
     unpack_struct (format, offset)
@@ -213,19 +214,19 @@ class proxy_handler (mapping, offset = 0, size = None, rw = False,
   constants that may be used for the typecode.
 
 ```python
-class proxy_list
+class ProxyList
 ```
 
-  The indirect form of a builtin **list**, constructed by a **proxy_handler** out of a
-  mapping. Instances of this class behave like a Python list, with the following exceptions:
+  The indirect form of a builtin **list**, constructed by a **Proxy** out of a mapping.
+  Instances of this class behave like a Python list, with the following exceptions:
 
-  * A proxy_list is only mutable (i.e: Its elements can be set) iff the underlying mapping
+  * A ProxyList is only mutable (i.e: Its elements can be set) iff the underlying mapping
     is read-write, and if its elements are all primitives (integers or floats) of the same
     type.
-  * The size of a proxy_list cannot be modified, even if it's mutable. This means that the
+  * The size of a ProxyList cannot be modified, even if it's mutable. This means that the
     following interfaces are not available: _append_, _clear_, _extend_, _insert_, _pop_,
     _remove_, _reverse_, _sort_.
-  * A proxy_list implements 2 methods not present in regular lists, specified below:
+  * A ProxyList implements 2 methods not present in regular lists, specified below:
 
   ```python
     atomic_cas (index, expected, new)
@@ -239,29 +240,31 @@ class proxy_list
     atomic_add (index, value)
   ```
 
-  Atomically adds _value_ to the element in the proxy_list at position _index_. This
+  Atomically adds _value_ to the element in the ProxyList at position _index_. This
   method only works if the list is mutable. Returns the previous element at the specified
   position.
 
 ```python
-class proxy_str
+class ProxyStr
 ```
 
   Indirect form of a builtin **str**. Implements the same interface.
 
 ```python
-class proxy_set
+class ProxySet
 ```
 
-  Indirect form of a builtin **frozenset**. Implements the same interface.
+  Indirect form of a builtin **frozenset**. Instances of this class are always immutable,
+  which means that the following interfaces are not available: _add_, _clear_, _pop_,
+  _remove_, _update_.
 
 ```python
-class proxy_dict
+class ProxyDict
 ```
 
   Indirect form of a builtin **dict**. Instances of this class are always immutable, which
   means that the following interfaces are not available: _clear_, _pop_, _popitem_,
-  _setdefault_, _update_. In addition, since a proxy_dict is built from a proxy_handler,
+  _setdefault_, _update_. In addition, since a ProxyDict is built from a Proxy,
   the class method _fromkeys_ is not implemented.
 
 ## Custom objects
@@ -270,8 +273,7 @@ When a user-defined class is packed and then unpacked, **zser** dynamically crea
 class to masquerade it. Instances of this newly created class implements the same methods
 and have the same properties of the original object, with the following caveats:
 
-  * The object's slots are implemented as descriptors that access the data via a
-    proxy_handler.
+  * The object's slots are implemented as descriptors that access the data via a Proxy.
   * The object's slots can be mutated iff the the underlying mapping is mutable, and if
     their type is primitive (integer or float)
   * The descriptors that implement the object's slots have 2 additional methods: **cas** and
@@ -280,7 +282,7 @@ and have the same properties of the original object, with the following caveats:
   ```python
     x = myclass (value = 1)   # Create object with slot named 'value'
     proxy = zser.unpack_from (zser.pack (x), rw = True)
-    type(proxy).value.add (-1)   # Atomically adds -1 to proxy's value
+    type(proxy).value.add (-1)     # Atomically adds -1 to proxy's value
     type(proxy).value.cas (0, 2)   # Atomic CAS on proxy's value
   ```
 
@@ -299,7 +301,7 @@ the following: **int**, **float**, **str**, **frozenset**, **tuple** and all pro
 def register_pack (type)
 ```
 
-Registers a packing routine for the specified type. Once registered, if a **packer**
+Registers a packing routine for the specified type. Once registered, if a **Packer**
 encounters an object of this type, the function will be called with the packer
 as its first argument, and the object as the second one. For example:
 
@@ -317,8 +319,8 @@ def register_unpack (type)
 ```
 Registers an unpacking routine for the specified type. Once registered, if a proxy
 container encounters the specified type, the function will be called with 3 arguments:
-The type of the object that should be unpacked, the **proxy_handler** and the offset
-at which the unpacking takes place. For example:
+The type of the object that should be unpacked, the **Proxy** and the offset at which
+the unpacking takes place. For example:
 
   ```python
   class Foo:
@@ -334,7 +336,7 @@ def pack (obj, **kwargs)
 ```
 
 Returns the binary representation of the object as a bytearray. Equivalent to
-creating a **packer** with the passed keyword arguments, calling _pack_ with
+creating a **Packer** with the passed keyword arguments, calling _pack_ with
 the passed object and then returning the value of calling _as_bytearray_.
 
 ```python
@@ -346,15 +348,14 @@ can be a bytearray, in which case the object will be written at the specified
 offset (or concatenated, if _offset_ is None). Otherwise, _place_ must
 implement a method, _write_, which will be called with the packed object,
 and _seek_, if the offset is not _None_, in order to write the object at the
-specified offset (i.e: Like a file does). Returns the number of writes written.
+specified offset (i.e: Like a file does). Returns the number of bytes written.
 
 ```python
 def unpack_from (place, offset = 0, **kwargs)
 ```
 
 Unpacks an object from the specified input and from an offset. The keyword arguments are
-used to construct a **proxy_handler**. See its documentation for a description of the
-parameters.
+used to construct a **Proxy**. See its documentation for a description of the parameters.
 
 ```python
 def unpack_as (place, code, offset = 0, **kwargs)
@@ -362,9 +363,12 @@ def unpack_as (place, code, offset = 0, **kwargs)
 
 Unpacks an object from the specified input, and with the specified typecode and offset.
 The typecode can be one of the following module constants:
-  * TYPE_INT: Signed integer
-  * TYPE_UINT: Unsigned integer
-  * TYPE_FLOAT: Floating point value
+  * TYPE_INT8: Signed 8-bit integer.
+  * TYPE_INT16: Signed 16-bit integer.
+  * TYPE_INT32: Signed 32-bit integer.
+  * TYPE_INT64: Signed 64-bit integer.
+  * TYPE_FLOAT32: 32-bit floating point type.
+  * TYPE_FLOAT64: 64-bit floating point type.
   * TYPE_BIGINT: Arbitrary precision number
   * TYPE_NONE, TYPE_TRUE, TYPE_FALSE: The constants _None_, _True_, _False_
   * TYPE_BACKREF: A reference to an object that was previously serialized

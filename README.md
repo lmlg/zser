@@ -18,6 +18,8 @@ Here's how 2 processes could share a chunk of data, and potentially modify it as
 well, in an atomic way:
 
 ```python
+    import zser
+
     data = { "abc": [1, 2, 3] }
     with open ("input", "wb") as f:
         zser.pack_into (data, f)
@@ -27,7 +29,7 @@ well, in an atomic way:
         data = zser.unpack_from (f, rw = True)   # Unpacked in O(1) time.
 
     lst = data["abc"]
-    # The above returns a 'proxy_list' instead of a python list
+    # The above returns a 'ProxyList' instead of a Python list
     # It consumes a fixed amount of memory, independent of the number
     # of elements. It implements mostly the same interface, with some
     # additions to make it easy to share and modify across processes:

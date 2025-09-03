@@ -62,7 +62,7 @@ cdef size_t[6] _BASIC_SIZES = [sizeof (char), sizeof (short),
 
 # Basic types that may be stored inline in lists, sets, dicts and descriptors.
 ctypedef fused cnum:
-  char
+  signed char
   unsigned char
   short
   unsigned short
@@ -105,7 +105,7 @@ cdef union fn_caster:
 # Special object used for detecting misses in dict lookups.
 cdef object _SENTINEL = object ()
 
-cdef inline bint _is_inline_code (unsigned int code) noexcept:
+cdef inline bint _is_inline_code (unsigned int code) :
   return code <= tpcode.FLOAT64
 
 cdef inline size_t _get_padding (size_t off, size_t size):
@@ -131,7 +131,7 @@ cdef _pack_cnum (Packer xm, int code, cnum value, bint tag):
 
 def _pack_int (Packer xm, value, tag):
   if INT8_MIN <= value <= INT8_MAX:
-    _pack_cnum[char] (xm, tpcode.INT8, value, tag)
+    _pack_cnum[cy.schar] (xm, tpcode.INT8, value, tag)
   elif INT16_MIN <= value <= INT16_MAX:
     _pack_cnum[short] (xm, tpcode.INT16, value, tag)
   elif INT32_MIN <= value <= INT32_MAX:
@@ -834,7 +834,7 @@ cdef class Proxy:
     cdef unsigned int ilen
 
     if code == tpcode.INT8:
-      return _cnum_unpack[char] (self, offset, 0)
+      return _cnum_unpack[cy.schar] (self, offset, 0)
     elif code == tpcode.INT16:
       return _cnum_unpack[short] (self, offset, 0)
     elif code == tpcode.INT32:
@@ -921,7 +921,7 @@ cdef class Proxy:
 cdef inline object _builtin_read (void *buf, Py_ssize_t pos,
                                   unsigned int code):
   if code == tpcode.INT8:
-    return (<char *>buf)[pos]
+    return (<signed char *>buf)[pos]
   elif code == tpcode.INT16:
     return (<short *>buf)[pos]
   elif code == tpcode.INT32:
@@ -935,7 +935,7 @@ cdef inline object _builtin_read (void *buf, Py_ssize_t pos,
 cdef inline void _builtin_write (void *buf, Py_ssize_t pos,
                                  object obj, unsigned int code):
   if code == tpcode.INT8:
-    (<int *>buf)[pos] = obj
+    (<signed char *>buf)[pos] = obj
   elif code == tpcode.INT16:
     (<short *>buf)[pos] = obj
   elif code == tpcode.INT32:
@@ -989,7 +989,7 @@ cdef inline object _builtin_aadd_impl (cnum *ptr, object val):
 cdef inline object _builtin_aadd (void *buf, Py_ssize_t pos,
                                   object val, unsigned int code):
   if code == tpcode.INT8:
-    return _builtin_aadd_impl[char] (<char *>buf + pos, val)
+    return _builtin_aadd_impl[cy.schar] (<signed char *>buf + pos, val)
   elif code == tpcode.INT16:
     return _builtin_aadd_impl[short] (<short *>buf + pos, val)
   elif code == tpcode.INT32:
@@ -1004,7 +1004,7 @@ cdef inline object _builtin_aadd (void *buf, Py_ssize_t pos,
 cdef object _builtin_acas (void *buf, Py_ssize_t pos, object exp,
                            object nval, unsigned int code):
   if code == tpcode.INT8:
-    return _builtin_acas_impl[char] (<char *>buf + pos, exp, nval)
+    return _builtin_acas_impl[cy.schar] (<signed char *>buf + pos, exp, nval)
   elif code == tpcode.INT16:
     return _builtin_acas_impl[short] (<short *>buf + pos, exp, nval)
   elif code == tpcode.INT32:
@@ -1538,13 +1538,13 @@ cdef _ProxyStr_mul (x, y):
 TYPE_PATCH (<PyTypeObject *>ProxyStr, _ProxyStr_add,
             _ProxyStr_mod, _ProxyStr_mul)
 
-cdef inline size_t _rotate_hash (size_t code, size_t nbits) noexcept:
+cdef inline size_t _rotate_hash (size_t code, size_t nbits) :
   return (code << nbits) | (code >> (sizeof (size_t) * 8 - nbits))
 
-cdef inline size_t _mix_hash (size_t h1, size_t h2) noexcept:
+cdef inline size_t _mix_hash (size_t h1, size_t h2) :
   return _rotate_hash (h1, 5) ^ h2
 
-cdef inline size_t _hash_buf (const void *ptr, size_t nbytes) noexcept:
+cdef inline size_t _hash_buf (const void *ptr, size_t nbytes) :
   cdef size_t ret
 
   ret = nbytes
@@ -1554,7 +1554,7 @@ cdef inline size_t _hash_buf (const void *ptr, size_t nbytes) noexcept:
 
   return ret if ret != 0 else WORD_MAX
 
-cdef inline size_t _hash_str (str sobj) noexcept:
+cdef inline size_t _hash_str (str sobj) :
   cdef unsigned int kind
 
   kind = STR_KIND (sobj)
@@ -1562,7 +1562,7 @@ cdef inline size_t _hash_str (str sobj) noexcept:
     kind = 1
   return _hash_buf (PyUnicode_DATA (sobj), len (sobj) * kind)
 
-cdef inline size_t _hash_flt (double flt) noexcept:
+cdef inline size_t _hash_flt (double flt) :
   cdef double ipart
 
   if modf (flt, &ipart) == 0:
@@ -1624,7 +1624,7 @@ def xhash (obj, seed = 0):
 
 #######################################
 
-cdef inline Py_ssize_t _cfloat_diff (cfloat x, cfloat y) noexcept:
+cdef inline Py_ssize_t _cfloat_diff (cfloat x, cfloat y) :
   cdef double ret
 
   ret = x - y
@@ -1706,7 +1706,7 @@ cdef int _cnum_find_sorted (const unsigned char *ptr, size_t n, obj,
 
 @cy.cdivision (True)
 @cy.nogil
-cdef size_t _find_hidx (hidx_type hidxs, size_t hval, size_t n) noexcept:
+cdef size_t _find_hidx (hidx_type hidxs, size_t hval, size_t n) :
   cdef size_t i, step, tmp
 
   i = 0
@@ -1779,7 +1779,7 @@ cdef size_t _find_obj_by_hidx (hidx_type hidxs, size_t ix, size_t n,
 ################################
 # Functions on sets.
 
-cdef inline bint _cnum_lt (cnum x, cnum y) noexcept:
+cdef inline bint _cnum_lt (cnum x, cnum y) :
   if cnum is double or cnum is float:
     return _cfloat_diff (x, y) < 0
   else:
@@ -1920,7 +1920,7 @@ cdef class ProxySet:
       p2 = <const unsigned char *> (ix2.proxy.base + ix2.offset)
 
       if ix1.code == tpcode.INT8:
-        _cnum_set_union[char] (p1, ix1.size, p2, ix2.size, out, 0)
+        _cnum_set_union[cy.schar] (p1, ix1.size, p2, ix2.size, out, 0)
       elif ix1.code == tpcode.INT16:
         _cnum_set_union[short] (p1, ix1.size, p2, ix2.size, out, 0)
       elif ix1.code == tpcode.INT32:
@@ -1950,7 +1950,7 @@ cdef class ProxySet:
       p2 = <const unsigned char *> (ix2.proxy.base + ix2.offset)
 
       if ix1.code == tpcode.INT8:
-        _cnum_set_intersection[char] (p1, ix1.size, p2, ix2.size, out, 0)
+        _cnum_set_intersection[cy.schar] (p1, ix1.size, p2, ix2.size, out, 0)
       elif ix1.code == tpcode.INT16:
         _cnum_set_intersection[short] (p1, ix1.size, p2, ix2.size, out, 0)
       elif ix1.code == tpcode.INT32:
@@ -1980,7 +1980,7 @@ cdef class ProxySet:
       p2 = <const unsigned char *> (ix2.proxy.base + ix2.offset)
 
       if ix1.code == tpcode.INT8:
-        _cnum_set_difference[char] (p1, ix1.size, p2, ix2.size, out, 0)
+        _cnum_set_difference[cy.schar] (p1, ix1.size, p2, ix2.size, out, 0)
       elif ix1.code == tpcode.INT16:
         _cnum_set_difference[short] (p1, ix1.size, p2, ix2.size, out, 0)
       elif ix1.code == tpcode.INT32:
@@ -2010,7 +2010,7 @@ cdef class ProxySet:
       p2 = <const unsigned char *> (ix2.proxy.base + ix2.offset)
 
       if ix1.code == tpcode.INT8:
-        _cnum_set_symdiff[char] (p1, ix1.size, p2, ix2.size, out, 0)
+        _cnum_set_symdiff[cy.schar] (p1, ix1.size, p2, ix2.size, out, 0)
       elif ix1.code == tpcode.INT16:
         _cnum_set_symdiff[short] (p1, ix1.size, p2, ix2.size, out, 0)
       elif ix1.code == tpcode.INT32:
@@ -2042,7 +2042,7 @@ cdef class ProxySet:
     ptr = <const unsigned char *> (proxy.base + indices.offset)
 
     if code == tpcode.INT8:
-      return _cnum_find_sorted[char] (ptr, n, value, 0, 0)
+      return _cnum_find_sorted[cy.schar] (ptr, n, value, 0, 0)
     elif code == tpcode.INT16:
       return _cnum_find_sorted[short] (ptr, n, value, 0, 0)
     elif code == tpcode.INT32:
@@ -2211,7 +2211,7 @@ cdef class ProxySet:
       if ix1.size > ix2.size:
         ret = False
       elif self.indices.code == tpcode.INT8:
-        ret = _cnum_set_includes[char] (p2, ix2.size, p1, ix1.size, 0)
+        ret = _cnum_set_includes[cy.schar] (p2, ix2.size, p1, ix1.size, 0)
       elif self.indices.code == tpcode.INT16:
         ret = _cnum_set_includes[short] (p2, ix2.size, p1, ix1.size, 0)
       elif self.indices.code == tpcode.INT32:

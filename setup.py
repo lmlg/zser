@@ -3,7 +3,7 @@ import os
 import shutil
 import sys
 from setuptools import setup, Extension
-from setuptools.command.build import build
+from setuptools.command.build_ext import build_ext
 from Cython.Build import cythonize
 
 extension_modules = [
@@ -21,7 +21,7 @@ with open (os.path.join (base_path, "zser/_version.py"), "w") as vfile:
 with open (os.path.join (base_path, "requirements.txt")) as reqs:
   requirements = reqs.read ()
 
-class CustomBuild(build):
+class CustomBuild(build_ext):
   def run(self):
     super().run()
     suffix = '.dll' if 'win' in sys.platform.lower() else '.so'
@@ -45,7 +45,7 @@ setup (
   test_suite = "tests",
   install_requires = requirements,
   zip_safe = False,
-  cmdclass = {'build': CustomBuild},
+  cmdclass = {'build_ext': CustomBuild},
   ext_modules = cythonize (extension_modules, include_path = include_dirs,
                            language_level = 3, annotate = True,
                            compiler_directives = {'embedsignature': True}),
