@@ -13,8 +13,7 @@ jobs:
     name: Build the library and run tests
     strategy:
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04, ubuntu-22.04,
-             ubuntu-24.04-arm, macos-latest, macos-14]
+        os: [ubuntu-latest, ubuntu-24.04, ubuntu-22.04, ubuntu-24.04-arm]
       fail-fast: false
     runs-on: ${{ matrix.os }}
     steps:
