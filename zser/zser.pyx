@@ -921,7 +921,7 @@ cdef class Proxy:
 cdef inline object _builtin_read (void *buf, Py_ssize_t pos,
                                   unsigned int code):
   if code == tpcode.INT8:
-    return (<char *>buf)[pos]
+    return (<signed char *>buf)[pos]
   elif code == tpcode.INT16:
     return (<short *>buf)[pos]
   elif code == tpcode.INT32:
@@ -935,7 +935,7 @@ cdef inline object _builtin_read (void *buf, Py_ssize_t pos,
 cdef inline void _builtin_write (void *buf, Py_ssize_t pos,
                                  object obj, unsigned int code):
   if code == tpcode.INT8:
-    (<int *>buf)[pos] = obj
+    (<signed char *>buf)[pos] = obj
   elif code == tpcode.INT16:
     (<short *>buf)[pos] = obj
   elif code == tpcode.INT32:

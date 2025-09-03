@@ -27,7 +27,9 @@ jobs:
             sudo apt update
             sudo apt install -y python3-pytest cython3
           else
+            sudo python3 -m ensurepip --upgrade || true
             brew install pytest cython python-setuptools
+            pip install Cython
           fi
 
       - name: Build and install library
