@@ -21,18 +21,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install pytest
+      - name: Install dependencies
         run: |
           if [[ "${{ matrix.os }}" =~ "ubuntu" ]]; then
             sudo apt update
             sudo apt install -y python3-pytest cython3
           else
-            sudo python3 -m ensurepip --upgrade
-            sudo pip3 install pytest Cython
+            sudo brew install pytest cython
           fi
 
       - name: Build and install library
         run: |
+          python3 setup.py build_ext
           sudo python3 setup.py install
 
       - name: Run tests
