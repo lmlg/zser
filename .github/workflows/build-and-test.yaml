@@ -27,8 +27,8 @@ jobs:
             sudo apt update
             sudo apt install -y python3-pytest cython3
           else
-            brew install pipx
-            pipx install cython setuptools
+            brew install pipx pytest cython python-setuptools
+            pipx install cython
           fi
 
       - name: Build and install library
