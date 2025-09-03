@@ -105,7 +105,7 @@ cdef union fn_caster:
 # Special object used for detecting misses in dict lookups.
 cdef object _SENTINEL = object ()
 
-cdef inline bint _is_inline_code (unsigned int code) noexcept:
+cdef inline bint _is_inline_code (unsigned int code) :
   return code <= tpcode.FLOAT64
 
 cdef inline size_t _get_padding (size_t off, size_t size):
@@ -1538,13 +1538,13 @@ cdef _ProxyStr_mul (x, y):
 TYPE_PATCH (<PyTypeObject *>ProxyStr, _ProxyStr_add,
             _ProxyStr_mod, _ProxyStr_mul)
 
-cdef inline size_t _rotate_hash (size_t code, size_t nbits) noexcept:
+cdef inline size_t _rotate_hash (size_t code, size_t nbits) :
   return (code << nbits) | (code >> (sizeof (size_t) * 8 - nbits))
 
-cdef inline size_t _mix_hash (size_t h1, size_t h2) noexcept:
+cdef inline size_t _mix_hash (size_t h1, size_t h2) :
   return _rotate_hash (h1, 5) ^ h2
 
-cdef inline size_t _hash_buf (const void *ptr, size_t nbytes) noexcept:
+cdef inline size_t _hash_buf (const void *ptr, size_t nbytes) :
   cdef size_t ret
 
   ret = nbytes
@@ -1554,7 +1554,7 @@ cdef inline size_t _hash_buf (const void *ptr, size_t nbytes) noexcept:
 
   return ret if ret != 0 else WORD_MAX
 
-cdef inline size_t _hash_str (str sobj) noexcept:
+cdef inline size_t _hash_str (str sobj) :
   cdef unsigned int kind
 
   kind = STR_KIND (sobj)
@@ -1562,7 +1562,7 @@ cdef inline size_t _hash_str (str sobj) noexcept:
     kind = 1
   return _hash_buf (PyUnicode_DATA (sobj), len (sobj) * kind)
 
-cdef inline size_t _hash_flt (double flt) noexcept:
+cdef inline size_t _hash_flt (double flt) :
   cdef double ipart
 
   if modf (flt, &ipart) == 0:
@@ -1624,7 +1624,7 @@ def xhash (obj, seed = 0):
 
 #######################################
 
-cdef inline Py_ssize_t _cfloat_diff (cfloat x, cfloat y) noexcept:
+cdef inline Py_ssize_t _cfloat_diff (cfloat x, cfloat y) :
   cdef double ret
 
   ret = x - y
@@ -1706,7 +1706,7 @@ cdef int _cnum_find_sorted (const unsigned char *ptr, size_t n, obj,
 
 @cy.cdivision (True)
 @cy.nogil
-cdef size_t _find_hidx (hidx_type hidxs, size_t hval, size_t n) noexcept:
+cdef size_t _find_hidx (hidx_type hidxs, size_t hval, size_t n) :
   cdef size_t i, step, tmp
 
   i = 0
@@ -1779,7 +1779,7 @@ cdef size_t _find_obj_by_hidx (hidx_type hidxs, size_t ix, size_t n,
 ################################
 # Functions on sets.
 
-cdef inline bint _cnum_lt (cnum x, cnum y) noexcept:
+cdef inline bint _cnum_lt (cnum x, cnum y) :
   if cnum is double or cnum is float:
     return _cfloat_diff (x, y) < 0
   else:
