@@ -15,11 +15,12 @@
  # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 cimport cython as cy
-from functools import partial
+from functools import partial as _partial
 from importlib import import_module
 from itertools import chain
 import hashlib
 import hmac
+from io import StringIO
 import mmap
 import operator
 import struct
@@ -406,7 +407,7 @@ cdef _pack_set (Packer xm, value, tag):
 
     offcodes[-1][1] |= off << _OFF_SHIFT
 
-  offcodes.sort (key = partial (_key_by_index, 0))
+  offcodes.sort (key = _partial (_key_by_index, 0))
   offcodes = sum (offcodes, [])
   tplen = len (offcodes)
   base_fmt = "=c" + _WORD_FMT
@@ -454,8 +455,9 @@ cdef _pack_dict (Packer xm, value, tag):
         wide = True
       offcodes[-1][2] |= off << _OFF_SHIFT
 
-  offcodes.sort (key = partial (_key_by_index, 0))
+  offcodes.sort (key = _partial (_key_by_index, 0))
   offcodes = sum (offcodes, [])
+
   tplen = len (offcodes)
   base_fmt = "=c" + _WORD_FMT
   code = b"Q" if wide else b"I"
@@ -908,8 +910,8 @@ cdef class Proxy:
       fn = _dispatch_type_impl (self.custom_packers, typ, direction.UNPACK)
       if fn is None:
         raise TypeError ("cannot unpack type %r" % typ)
-      return fn (typ, self, offset +
-                            _get_padding (offset, sizeof (long long)))
+      return fn (typ, self,
+                 offset + _get_padding (offset, sizeof (long long)))
     raise TypeError ("Cannot unpack typecode %r" % code)
 
   cdef object _unpack_with_data (self, unsigned long long data,
@@ -1099,13 +1101,12 @@ cdef class ProxyList:
         atomic_fence ()
 
       return _builtin_read (ptr, pos, code)
+    elif self.code == b"I":
+      data = (<unsigned int *>ptr)[pos]
     else:
-      if self.code == b"I":
-        data = (<unsigned int *>ptr)[pos]
-      else:
-        data = (<unsigned long long *>ptr)[pos]
+      data = (<unsigned long long *>ptr)[pos]
 
-      return self.proxy._unpack_with_data (data, self)
+    return self.proxy._unpack_with_data (data, self)
 
   @cy.cdivision (True)
   def __getitem__ (self, idx):
@@ -1178,10 +1179,10 @@ cdef class ProxyList:
     pos = self._mutable_idx (idx)
     ptr = self.proxy.base + self.offset
 
-    if _is_inline_code (self.code):
-      _builtin_write (ptr, pos, value, self.code)
-    else:
+    if not _is_inline_code (self.code):
       raise TypeError ("cannot modify non-primitive proxy list")
+
+    _builtin_write (ptr, pos, value, self.code)
 
   def atomic_cas (self, idx, exp, nval):
     """
@@ -1222,8 +1223,34 @@ cdef class ProxyList:
     for i in range (self.size):
       yield self._c_index (i, code)
 
-  def __str__ (self):
-    return "[%s]" % ",".join ([str (x) for x in self])
+  @cy.final
+  cdef str _to_str (ProxyList self, dict id_map):
+    cdef ProxyList other
+
+    id_map[self.offset] = self
+    sio = StringIO()
+    swrite = sio.write
+
+    swrite ('[')
+    for elem in self:
+      if type(elem) is not ProxyList:
+        swrite (str (elem))
+      else:
+        other = (<ProxyList>elem)
+        if other.offset in id_map:
+          swrite('[...]')
+        else:
+          id_map[other.offset] = other
+          swrite (other._to_str (id_map))
+
+      swrite (', ')
+    return sio.getvalue()[:-2] + ']'
+
+  def __str__(self):
+    if _is_inline_code (self.code):
+      return "[%s]" % ",".join ([str (x) for x in self])
+
+    return self._to_str({id(self): self})
 
   def __repr__ (self):
     return "ProxyList(%s)" % self
@@ -1616,9 +1643,8 @@ cdef size_t _xhash (obj, size_t seed) except 0:
     ret = hash (obj)
   else:
     ty = type (obj)
-    if isinstance (obj, ProxyList):
-      if (<ProxyList>obj).mutable:
-        raise TypeError ("cannot hash mutable proxy list")
+    if isinstance (obj, ProxyList) and (<ProxyList>obj).mutable:
+      raise TypeError ("cannot hash mutable proxy list")
 
     code = _HASH_VALUES.get (ty)
     if code is None:
@@ -2432,6 +2458,18 @@ cdef class ProxyDict:
   def copy (self):
     return dict (self.items ())
 
+  cdef size_t _hash (ProxyDict self):
+    cdef size_t ret
+
+    ret = 0x3fc01436
+    for key in self.keys ():
+      ret = _mix_hash (ret, _xhash (key, self.indices.proxy.hash_seed))
+
+    return ret
+
+  def __hash__ (self):
+    return (<ProxyDict>self)._hash ()
+
   def __eq__ (self, other):
     try:
       if len (self) != len (other):
@@ -2621,13 +2659,13 @@ def register_pack (typ):
   """
   Decorator used to register a packing function for the specified type.
   """
-  return partial (_register_impl, typ, direction.PACK)
+  return _partial (_register_impl, typ, direction.PACK)
 
 def register_unpack (typ):
   """
   Decorator used to register an unpacking function for the specified type.
   """
-  return partial (_register_impl, typ, direction.UNPACK)
+  return _partial (_register_impl, typ, direction.UNPACK)
 
 cdef object _dispatch_type_impl (dict packers, typ, unsigned int ix):
   cdef list flist, val

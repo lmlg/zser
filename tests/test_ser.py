@@ -403,6 +403,7 @@ def test_backref ():
   q = zser.unpack_from (bx, rw = True)
   q[0].x = -33
   assert q[-1][0].x == q[0].x
+  assert '[...]' in str(q)
 
 def tst_atomic (value):
   c = CustomWithDict (None, value, [])
