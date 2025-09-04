@@ -1,3 +1,19 @@
+ # Copyright (c) 2025 Luciano Lo Giudice
+ # Copyright (c) 2025 Agustina Arzille.
+ #
+ # This program is free software: you can redistribute it and/or modify
+ # it under the terms of the GNU General Public License as published by
+ # the Free Software Foundation, either version 3 of the License, or
+ # (at your option) any later version.
+ #
+ # This program is distributed in the hope that it will be useful,
+ # but WITHOUT ANY WARRANTY; without even the implied warranty of
+ # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ # GNU General Public License for more details.
+ #
+ # You should have received a copy of the GNU General Public License
+ # along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
 cimport cython as cy
 from functools import partial
 from importlib import import_module
@@ -73,6 +89,8 @@ ctypedef fused cnum:
   float
   double
 
+# Basic floating point types. Also declared here as a workaround for atomic
+# operations, which need special implementations for them.
 ctypedef fused cfloat:
   float
   double
@@ -105,7 +123,7 @@ cdef union fn_caster:
 # Special object used for detecting misses in dict lookups.
 cdef object _SENTINEL = object ()
 
-cdef inline bint _is_inline_code (unsigned int code) :
+cdef inline bint _is_inline_code (unsigned int code):
   return code <= tpcode.FLOAT64
 
 cdef inline size_t _get_padding (size_t off, size_t size):
@@ -153,6 +171,7 @@ cdef int _float_code (obj):
 
   if FLOAT32_MIN <= obj <= FLOAT32_MAX:
     dbl = obj
+    # Only use FLOAT32 if we're certain no precision loss takes place.
     if <float>dbl == dbl:
       return tpcode.FLOAT32
   return tpcode.FLOAT64
@@ -311,6 +330,7 @@ cdef _pack_array (Packer xm, value, tag):
     xm.putb (tpcode.LIST if type (value) is list else tpcode.TUPLE)
 
   if xtype >= 0:
+    # Inline integers or floats.
     xm.putb (xtype)
     fmt = _BASIC_FMTS[xtype]
     xm.align_to (_BASIC_SIZES[xtype])
@@ -346,7 +366,7 @@ cdef _pack_array (Packer xm, value, tag):
     xm.align_to (sizeof (long long))
   xm.bwrite (m2)
 
-# Helper to sort (endian-dependent) offsets.
+# Helper to sort offsets.
 def _key_by_index (idx, obj):
   return obj[idx]
 
@@ -360,6 +380,7 @@ cdef _pack_set (Packer xm, value, tag):
   offset = xm.offset
 
   if _compute_basic_type (value) >= 0:
+    # Set is packed as a sorted array of inline objects.
     lst = tuple (sorted (value))
     _pack_array (xm, lst, False)
     return
@@ -962,20 +983,17 @@ cdef inline object _cfloat_aadd (cfloat *ptr, object val):
   cdef cfloat delta, tmp, new
 
   delta = val
-  if cfloat is float:
-    while 1:
-      tmp = ptr[0]
-      new = tmp + delta
+  while 1:
+    tmp = ptr[0]
+    new = tmp + delta
+    if cfloat is float:
       memcpy (&iexp, &tmp, sizeof (iexp))
-      memcpy (&inew, &new, sizeof (new))
+      memcpy (&inew, &new, sizeof (inew))
       if atomic_cas_bool (<int *>ptr, &iexp, &inew):
         return tmp
-  else:
-    while 1:
-      tmp = ptr[0]
-      new = tmp + delta
+    else:
       memcpy (&qexp, &tmp, sizeof (qexp))
-      memcpy (&qnew, &new, sizeof (new))
+      memcpy (&qnew, &new, sizeof (qnew))
       if atomic_cas_bool (<long long *>ptr, &qexp, &qnew):
         return tmp
 
@@ -1538,13 +1556,13 @@ cdef _ProxyStr_mul (x, y):
 TYPE_PATCH (<PyTypeObject *>ProxyStr, _ProxyStr_add,
             _ProxyStr_mod, _ProxyStr_mul)
 
-cdef inline size_t _rotate_hash (size_t code, size_t nbits) :
+cdef inline size_t _rotate_hash (size_t code, size_t nbits):
   return (code << nbits) | (code >> (sizeof (size_t) * 8 - nbits))
 
-cdef inline size_t _mix_hash (size_t h1, size_t h2) :
+cdef inline size_t _mix_hash (size_t h1, size_t h2):
   return _rotate_hash (h1, 5) ^ h2
 
-cdef inline size_t _hash_buf (const void *ptr, size_t nbytes) :
+cdef inline size_t _hash_buf (const void *ptr, size_t nbytes):
   cdef size_t ret
 
   ret = nbytes
@@ -1554,7 +1572,7 @@ cdef inline size_t _hash_buf (const void *ptr, size_t nbytes) :
 
   return ret if ret != 0 else WORD_MAX
 
-cdef inline size_t _hash_str (str sobj) :
+cdef inline size_t _hash_str (str sobj):
   cdef unsigned int kind
 
   kind = STR_KIND (sobj)
@@ -1562,7 +1580,7 @@ cdef inline size_t _hash_str (str sobj) :
     kind = 1
   return _hash_buf (PyUnicode_DATA (sobj), len (sobj) * kind)
 
-cdef inline size_t _hash_flt (double flt) :
+cdef inline size_t _hash_flt (double flt):
   cdef double ipart
 
   if modf (flt, &ipart) == 0:
@@ -1624,7 +1642,7 @@ def xhash (obj, seed = 0):
 
 #######################################
 
-cdef inline Py_ssize_t _cfloat_diff (cfloat x, cfloat y) :
+cdef inline Py_ssize_t _cfloat_diff (cfloat x, cfloat y):
   cdef double ret
 
   ret = x - y
@@ -1706,7 +1724,7 @@ cdef int _cnum_find_sorted (const unsigned char *ptr, size_t n, obj,
 
 @cy.cdivision (True)
 @cy.nogil
-cdef size_t _find_hidx (hidx_type hidxs, size_t hval, size_t n) :
+cdef size_t _find_hidx (hidx_type hidxs, size_t hval, size_t n):
   cdef size_t i, step, tmp
 
   i = 0
@@ -1779,7 +1797,7 @@ cdef size_t _find_obj_by_hidx (hidx_type hidxs, size_t ix, size_t n,
 ################################
 # Functions on sets.
 
-cdef inline bint _cnum_lt (cnum x, cnum y) :
+cdef inline bint _cnum_lt (cnum x, cnum y):
   if cnum is double or cnum is float:
     return _cfloat_diff (x, y) < 0
   else:

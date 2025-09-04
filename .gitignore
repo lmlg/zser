@@ -133,3 +133,7 @@ dmypy.json
 
 # C files
 *.c
+
+# zser specific files
+zser/*.html
+zser/_version.py

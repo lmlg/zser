@@ -1,3 +1,19 @@
+ # Copyright (c) 2025 Luciano Lo Giudice
+ # Copyright (c) 2025 Agustina Arzille.
+ #
+ # This program is free software: you can redistribute it and/or modify
+ # it under the terms of the GNU General Public License as published by
+ # the Free Software Foundation, either version 3 of the License, or
+ # (at your option) any later version.
+ #
+ # This program is distributed in the hope that it will be useful,
+ # but WITHOUT ANY WARRANTY; without even the implied warranty of
+ # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ # GNU General Public License for more details.
+ #
+ # You should have received a copy of the GNU General Public License
+ # along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
 from cpython.buffer cimport PyObject_GetBuffer, PyBuffer_Release
 from cpython.bytearray cimport PyByteArray_Resize
 from cpython.object cimport PyTypeObject, binaryfunc
@@ -27,6 +43,7 @@ cdef extern from "defs.h":
   cdef str PyUnicode_FromStringAndSize (const char *, Py_ssize_t)
   cdef object PyUnicode_AsEncodedString (object, char *, char *)
 
+  # Internal string manipulation functions.
   cdef unsigned int STR_KIND (object)
   cdef object STR_NEW (unsigned int, size_t, const void *)
   cdef void STR_FINI (object)
@@ -34,6 +51,7 @@ cdef extern from "defs.h":
   cdef int TYPE_PATCH (PyTypeObject *, binaryfunc,
                        binaryfunc, binaryfunc) except -1
 
+  # Atomic operations.
   cdef void atomic_fence ()
   cdef bint atomic_is_lock_free (void *, size_t)
   cdef bint atomic_cas_bool (void *, void *, void *)
