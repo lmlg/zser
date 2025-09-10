@@ -970,7 +970,7 @@ cdef inline void _builtin_write (void *buf, Py_ssize_t pos,
   elif code == tpcode.FLOAT64:
     (<double *>buf)[pos] = obj
 
-  atomic_fence ()
+  atomic_fence_rel ()
 
 cdef inline bint _builtin_acas_impl (cnum *ptr, object o_exp, object o_nval):
   cdef cnum exp, val
@@ -1098,7 +1098,7 @@ cdef class ProxyList:
 
     if _is_inline_code (code):
       if self.mutable:
-        atomic_fence ()
+        atomic_fence_acq ()
 
       return _builtin_read (ptr, pos, code)
     elif self.code == b"I":
@@ -2513,7 +2513,7 @@ cdef class ProxyDescrBuiltin:
     if obj is None:
       return self
     elif self.proxy.rdwr:
-      atomic_fence ()
+      atomic_fence_acq ()
 
     return _builtin_read (self.ptr, 0, self.code)
 

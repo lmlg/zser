@@ -88,7 +88,8 @@ TYPE_PATCH (PyTypeObject *tp, binaryfunc add, binaryfunc mod, binaryfunc mul)
 
 /* Atomic definitions. */
 
-#define atomic_fence()   __atomic_thread_fence (__ATOMIC_SEQ_CST)
+#define atomic_fence_acq()   __atomic_thread_fence (__ATOMIC_ACQUIRE)
+#define atomic_fence_rel()   __atomic_thread_fence (__ATOMIC_RELEASE)
 
 #define atomic_is_lock_free(ptr, size)   \
   __atomic_is_lock_free ((size), (ptr))

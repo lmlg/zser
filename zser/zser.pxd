@@ -52,7 +52,8 @@ cdef extern from "defs.h":
                        binaryfunc, binaryfunc) except -1
 
   # Atomic operations.
-  cdef void atomic_fence ()
+  cdef void atomic_fence_acq ()
+  cdef void atomic_fence_rel ()
   cdef bint atomic_is_lock_free (void *, size_t)
   cdef bint atomic_cas_bool (void *, void *, void *)
   cdef void atomic_add (void *, void *)
