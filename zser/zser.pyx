@@ -232,7 +232,7 @@ cdef _pack_bytes (Packer xm, value, tag):
 
   src = value
   offset = prev = xm.offset
-  size = len (src)
+  size = len (value)
 
   xm.resize (1 + sizeof (size_t) + size)
   ptr = xm.wbytes
