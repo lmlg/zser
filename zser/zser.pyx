@@ -26,6 +26,7 @@ import operator
 import struct
 from sys import byteorder
 from threading import Lock
+from types import ModuleType
 
 cdef object S_pack_into = struct.pack_into
 cdef object S_unpack_from = struct.unpack_from
@@ -65,6 +66,8 @@ cdef object _custom_packers_lock = Lock ()
 
 cdef object HMAC = hmac.HMAC
 cdef object _HASH_METHOD = hashlib.sha256
+
+cdef object _Type_Module = ModuleType
 
 # Useful constants.
 DEF _OFF_SHIFT = 5
@@ -123,6 +126,11 @@ cdef union fn_caster:
 
 # Special object used for detecting misses in dict lookups.
 cdef object _SENTINEL = object ()
+
+# Map used to fixup type names that aren't exported in the 'builtins' module.
+cdef dict _BUILTINS_MAP = {
+  'module': _Type_Module,
+}
 
 cdef inline bint _is_inline_code (unsigned int code):
   return code <= tpcode.FLOAT64
@@ -472,20 +480,23 @@ cdef _pack_dict (Packer xm, value, tag):
 cdef inline object _encode_str (object x):
   return PyUnicode_AsEncodedString (x, "utf8", cy.NULL)
 
-cdef _write_type (Packer xm, typ):
+cdef _write_secret (Packer xm, str x):
   cdef size_t sz
+  cdef object md, val
 
-  path = _encode_str (typ.__module__ + "." + typ.__name__)
-  sz = len (path)
-
+  val = _encode_str (x)
+  sz = len (val)
   if xm.import_key is not None:
     # Include the checksum key in the stream.
-    md = _encode_str (HMAC(xm.import_key, path, _HASH_METHOD).hexdigest())
+    md = _encode_str (HMAC(xm.import_key, val, _HASH_METHOD).hexdigest ())
     xm.pack_struct ("I%ds" % len (md), len (md), md)
 
-  xm.resize (sizeof (size_t) + 1 + sz)
+  xm.resize (sizeof (size_t) + sz + 1)
   xm.bump (_write_size (xm.wbytes, xm.offset, sz))
-  xm.bwrite (path)
+  xm.bwrite (val)
+
+cdef inline _write_type (Packer xm, typ):
+  _write_secret (xm, typ.__module__ + "." + typ.__name__)
 
 cdef dict _obj_vars (obj):
   ret = getattr (obj, "__dict__", _SENTINEL)
@@ -745,6 +756,12 @@ cdef class Packer:
       self.id_cache.pop (obj_id, None)
       raise
 
+  def write_secret (self, value):
+    """
+    Write an object encoded with the secret ``import_key``.
+    """
+    _write_secret (<Packer>self, value)
+
 cdef inline object _cnum_unpack (Proxy self, size_t offs, cnum value):
   cdef size_t extra
 
@@ -938,6 +955,18 @@ cdef class Proxy:
     at a specific offset.
     """
     return self._unpack_with_code (self.offset if off is None else off, code)
+
+  def read_secret (self, off = None):
+    cdef size_t offset
+    cdef size_t *offp
+
+    if off is not None:
+      offset = off
+      offp = &offset
+    else:
+      offp = &self.offset
+
+    return _read_secret (<Proxy>self, offp)
 
 ############################################
 
@@ -2568,9 +2597,9 @@ cdef inline str _decode_str (Proxy proxy, size_t off, size_t size):
   proxy._assert_len (off + size)
   return PyUnicode_FromStringAndSize (proxy.base + off, size)
 
-cdef object _read_type (Proxy proxy, size_t *offp):
+cdef str _read_secret (Proxy proxy, size_t *offp):
   cdef size_t off, size
-  cdef str path, md
+  cdef str val, md
   cdef unsigned int md_len
   cdef Py_ssize_t ix
 
@@ -2587,20 +2616,38 @@ cdef object _read_type (Proxy proxy, size_t *offp):
     memcpy (&size, proxy.base + off + 1, sizeof (size))
     off += sizeof (size)
 
-  off += 1
-  path = _decode_str (proxy, off, size)
-
-  ix = path.rfind (".")
-  if ix < 0:
-    raise ValueError ("got an invalid typename %r" % path)
-  elif (proxy.import_key is not None and
-      md != HMAC(proxy.import_key, _encode_str (path),
+  val = _decode_str (proxy, off + 1, size)
+  if (proxy.import_key is not None and
+      md != HMAC(proxy.import_key, _encode_str (val),
                  _HASH_METHOD).hexdigest ()):
     raise ValueError ("import signature mismatch")
 
-  typ = getattr (Import_Module (path[:ix]), path[ix + 1:])
-  offp[0] = off + size
-  return typ
+  offp[0] = off + size + 1
+  return val
+
+cdef object _fetch_type (str module, str name):
+  cdef object ret
+
+  try:
+    return getattr (Import_Module (module), name)
+  except AttributeError:
+    if module == 'builtins':
+      ret = _BUILTINS_MAP.get (name)
+      if ret is not None:
+        return ret
+    raise
+
+cdef object _read_type (Proxy proxy, size_t *offp):
+  cdef str path
+  cdef Py_ssize_t ix
+
+  path = _read_secret (proxy, offp)
+  ix = path.rfind (".")
+
+  if ix < 0:
+    raise ValueError ("got an invalid typename %r" % path)
+
+  return _fetch_type (path[:ix], path[ix + 1:])
 
 cdef object _proxy_obj (Proxy proxy, size_t off):
   cdef unsigned int wide, i_size, klen
@@ -2805,6 +2852,16 @@ def unproxy (obj):
   elif isinstance (obj, ProxyList):
     return (<ProxyList>obj)._unproxy ()
   return obj
+
+def _pack_module (packer, obj):
+  packer.write_secret (obj.__name__)
+
+def _unpack_module (cls, proxy, off):
+  return Import_Module (proxy.read_secret (off))
+
+
+_register_impl (_Type_Module, direction.PACK, _pack_module)
+_register_impl (_Type_Module, direction.UNPACK, _unpack_module)
 
 # Exported typecodes for the 'unpack_as' functions.
 TYPE_INT8 = tpcode.INT8
