@@ -761,9 +761,10 @@ cdef class Proxy:
     return self.max_size
 
   @cy.final
-  cdef void _assert_len (self, size_t size):
+  cdef int _assert_len (self, size_t size) except -1:
     if self.max_size < size:
       raise IndexError ("buffer too small")
+    return 0
 
   def __getbuffer__ (self, Py_buffer *buf, int flags):
     PyObject_GetBuffer (self.mbuf, buf, flags)
@@ -780,11 +781,11 @@ cdef class Proxy:
     return S_calcsize (fmt)
 
   @cy.final
-  cdef unsigned char _byte_at (self, size_t ix):
+  cdef int _byte_at (self, size_t ix) except -1:
     if ix >= self.max_size:
       raise IndexError ("buffer too small")
 
-    return self.base[ix]
+    return <unsigned char>self.base[ix]
 
   def __getitem__ (self, ix):
     "Return the byte at position ``ix``."
