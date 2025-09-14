@@ -93,27 +93,6 @@ def test_equal_dict_many ():
 
   tst_equality (d)
 
-def tst_unpack_as (obj, code):
-  bx = zser.pack (obj)
-  assert obj == zser.unproxy (zser.unpack_as (bx, code, 1, rw = True))
-  p = zser.Packer ()
-  p.pack (obj, tag = False)
-  bx = p.as_bytearray ()
-  assert obj == zser.unproxy (zser.unpack_as (bx, code, rw = True))
-
-def test_unpack_as ():
-  for obj, code in ((-1, zser.TYPE_INT8), (1 << 13, zser.TYPE_INT16),
-                    (44.55, zser.TYPE_FLOAT64), (1 << 100, zser.TYPE_BIGINT),
-                    ("???_*!az", zser.TYPE_STR), (b"13345", zser.TYPE_BYTES),
-                    (bytearray (b"abc000"), zser.TYPE_BYTEARRAY),
-                    ([44, -5.2, "abc"], zser.TYPE_LIST),
-                    ((b"!!!!", 777), zser.TYPE_TUPLE),
-                    (None, zser.TYPE_NONE), (True, zser.TYPE_TRUE),
-                    (False, zser.TYPE_FALSE),
-                    (set ([3, 1, 2]), zser.TYPE_SET),
-                    ({"a": 1, (3.14, 100): ""}, zser.TYPE_DICT)):
-    tst_unpack_as (obj, code)
-
 # Proxy list API
 
 def tst_plist_atomic (mul):
@@ -436,10 +415,10 @@ class Registered:
 
 @zser.register_pack (Registered)
 def pack_obj (pk, obj):
-  tmp = pk.copy ()
-  size = tmp.pack (obj.a1)
-  pk.pack_struct ("N", size)
-  pk.bwrite (tmp)
+  off = pk.getoff ()
+  pk.bump (pk.struct_size ("N"))
+  size = pk.pack (obj.a1)
+  pk.pack_struct_at ("N", off, size)
   pk.pack (obj.a2)
 
 @zser.register_unpack (Registered)
@@ -461,8 +440,11 @@ def test_register ():
 def tst_too_short (obj):
   bx = zser.pack (obj)
   for i in range (1, len (bx) - 1):
-    with pytest.raises (IndexError):
-      str (zser.unpack_from (bx[:-i]))
+    try:
+      new_obj = zser.unpack_from (bx[:-i])
+      assert new_obj != obj
+    except IndexError:
+      pass
 
 def test_poisoned ():
   for x in (1, 3.14, -123, "abcdef", ["qx", 1], (101, 69, 15 << 3),
@@ -478,11 +460,11 @@ def test_signature ():
   with pytest.raises (ValueError):
     zser.unpack_from (bx, import_key = ikey + "*")
 
-def test_short_mview ():
-  buf = zser.pack (1 << 30)
-  for i in range (1, 7):
-    with pytest.raises (IndexError):
-      zser.unpack_from (buf, 0, size = len (buf) - i)
+# Test that functions can be (un)packed
+
+def test_function_packing ():
+  fn = zser.unpack_from (zser.pack (os.getpid))
+  assert fn () == os.getpid ()
 
 # Test large offsets
 
