@@ -80,13 +80,6 @@ class Packer (offset = 0, id_cache = None, hash_seed = 0,
                 arbitrary code, this key can be used to prevent against malicious input.
 
   ```python
-    copy ()
-  ```
-
-  Returns a new packer that is a copy of the caller. Can be used to serialize complex
-  objects without the need of modifying the current object.
-
-  ```python
     resize (extra)
   ```
 
@@ -124,11 +117,15 @@ class Packer (offset = 0, id_cache = None, hash_seed = 0,
   Same as calling *struct.pack_into* with the packer's stream and offset as output.
 
   ```python
+    pack_struct_at (format, position, *args)
+  ```
+  Same as calling *struct.pack_into* with the packer's stream and *position* as output.
+
+  ```python
     bwrite (obj)
   ```
 
-  Writes _obj_ into the stream. The argument may be another packer, in which case its
-  byte stream will be written.
+  Writes _obj_ into the stream.
 
   ```python
     as_bytearray ()
@@ -137,10 +134,10 @@ class Packer (offset = 0, id_cache = None, hash_seed = 0,
   Returns a copy of the packer's byte stream.
 
   ```python
-    pack (obj, tag = True)
+    pack (obj)
   ```
 
-  Packs an object into the packer's stream. If _tag_ is true, also emits the typecode.
+  Packs an object into the packer's stream.
 
 ```python
 class Proxy (mapping, offset = 0, size = None, rw = False,
@@ -199,7 +196,7 @@ class Proxy (mapping, offset = 0, size = None, rw = False,
     unpack ()
   ```
 
-  Unpacks an object at the proxy_handler's current position and returns it.
+  Unpacks an object at the Proxy's current position and returns it.
 
   ```python
     unpack_from (offset)
@@ -225,7 +222,7 @@ class ProxyList
     type.
   * The size of a ProxyList cannot be modified, even if it's mutable. This means that the
     following interfaces are not available: _append_, _clear_, _extend_, _insert_, _pop_,
-    _remove_, _reverse_, _sort_.
+    _remove_, _reverse_. The method _sort_ is also not available.
   * A ProxyList implements 2 methods not present in regular lists, specified below:
 
   ```python
@@ -379,5 +376,5 @@ The typecode can be one of the following module constants:
 def unproxy (obj)
 ```
 
-Converts a proxy object (**proxy_list**, **proxy_str**, **proxy_set**, **proxy_dict**)
+Converts a proxy object (**ProxyList**, **ProxyStr**, **ProxySet**, **ProxyDict**)
 into its 'regular' counterpart, recursively.

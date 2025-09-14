@@ -26,7 +26,7 @@ import operator
 import struct
 from sys import byteorder
 from threading import Lock
-from types import ModuleType
+from types import BuiltinFunctionType, FunctionType, ModuleType
 
 cdef object S_pack_into = struct.pack_into
 cdef object S_unpack_from = struct.unpack_from
@@ -47,18 +47,6 @@ cdef object IT_chain = chain
 cdef str SYS_endian = byteorder
 cdef object Int_From_Bytes = int.from_bytes
 
-cdef str _WORD_FMT
-cdef str _IWORD_FMT
-
-if S_calcsize ("N") == 8:
-  # 64-bit architecture
-  _WORD_FMT, _IWORD_FMT = "Q", "q"
-else:
-  # 32-bit architecture
-  _WORD_FMT, _IWORD_FMT = "I", "i"
-
-cdef str _WORD_PACK = "=" + _WORD_FMT
-
 cdef object Import_Module = import_module
 
 cdef dict _custom_packers = {}
@@ -66,8 +54,6 @@ cdef object _custom_packers_lock = Lock ()
 
 cdef object HMAC = hmac.HMAC
 cdef object _HASH_METHOD = hashlib.sha256
-
-cdef object _Type_Module = ModuleType
 
 # Useful constants.
 DEF _OFF_SHIFT = 5
@@ -99,25 +85,9 @@ ctypedef fused cfloat:
   float
   double
 
-# Integer array types used for hash indexes. They come in variants of
-# 2 sizes (32 and 64 bit integers), and also in 2 'flavours': Those
-# used for sets (they only store the key offset), and those used for
-# dictionaries (store both key and value offsets).
-
-cdef struct array_2I:
-  unsigned int values[2]
-
-cdef struct array_2Q:
-  unsigned unsigned long long values[2]
-
-cdef struct array_3I:
-  unsigned int values[3]
-
-cdef struct array_3Q:
-  unsigned long long values[3]
-
-hidx_type = cy.fused_type ("const array_2I*", "const array_2Q*",
-                           "const array_3I*", "const array_3Q*")
+ctypedef fused hidx_type:
+  unsigned int
+  unsigned long long
 
 # Union used for type punning functions used for iterating proxy dicts.
 cdef union fn_caster:
@@ -129,7 +99,9 @@ cdef object _SENTINEL = object ()
 
 # Map used to fixup type names that aren't exported in the 'builtins' module.
 cdef dict _BUILTINS_MAP = {
-  'module': _Type_Module,
+  'module': ModuleType,
+  'function': FunctionType,
+  'builtin_function_or_method': BuiltinFunctionType
 }
 
 cdef inline bint _is_inline_code (unsigned int code):
@@ -138,40 +110,36 @@ cdef inline bint _is_inline_code (unsigned int code):
 cdef inline size_t _get_padding (size_t off, size_t size):
   return ((off + size) & ~(size - 1)) - off
 
-cdef _pack_cnum (Packer xm, int code, cnum value, bint tag):
+cdef _pack_cnum (Packer xm, int code, cnum value):
   cdef size_t offset, extra, rv
   cdef char *ptr
 
   offset = xm.offset
-  extra = _get_padding (offset + tag, sizeof (value))
-  rv = extra + tag + sizeof (value)
+  extra = _get_padding (offset + 1, sizeof (value))
+  rv = extra + sizeof (value) + 1
   xm.resize (rv)
   ptr = xm.wbytes
-  extra += offset
+  extra += offset + 1
 
-  if tag:
-    ptr[offset] = code
-    extra += 1
-
+  ptr[offset] = code
   (<cnum *> (ptr + extra))[0] = value
   xm.bump (rv)
 
-def _pack_int (Packer xm, value, tag):
+def _pack_int (Packer xm, value):
   if INT8_MIN <= value <= INT8_MAX:
-    _pack_cnum[cy.schar] (xm, tpcode.INT8, value, tag)
+    _pack_cnum[cy.schar] (xm, tpcode.INT8, value)
   elif INT16_MIN <= value <= INT16_MAX:
-    _pack_cnum[short] (xm, tpcode.INT16, value, tag)
+    _pack_cnum[short] (xm, tpcode.INT16, value)
   elif INT32_MIN <= value <= INT32_MAX:
-    _pack_cnum[int] (xm, tpcode.INT32, value, tag)
+    _pack_cnum[int] (xm, tpcode.INT32, value)
   elif INT64_MIN <= value <= INT64_MAX:
-    _pack_cnum[cy.longlong] (xm, tpcode.INT64, value, tag)
+    _pack_cnum[cy.longlong] (xm, tpcode.INT64, value)
   else:
     # Bigint.
     bitlen = value.bit_length ()
     rlen = bitlen // 8 + 1
     brepr = value.to_bytes (rlen, SYS_endian, signed = True)
-    if tag:
-      xm.putb (tpcode.NUM)
+    xm.putb (tpcode.NUM)
     blen = len (brepr)
     xm.pack_struct ("=I" + str (blen) + "s", blen, brepr)
 
@@ -185,25 +153,34 @@ cdef int _float_code (obj):
       return tpcode.FLOAT32
   return tpcode.FLOAT64
 
-def _pack_float (Packer xm, value, tag):
+def _pack_float (Packer xm, value):
   if _float_code (value) == tpcode.FLOAT32:
-    _pack_cnum[float] (xm, tpcode.FLOAT32, value, tag)
+    _pack_cnum[float] (xm, tpcode.FLOAT32, value)
   else:
-    _pack_cnum[double] (xm, tpcode.FLOAT64, value, tag)
+    _pack_cnum[double] (xm, tpcode.FLOAT64, value)
 
-cpdef _write_size (buf, size_t offs, size_t sz):
-  cdef char *ptr
+cdef size_t _write_uleb128 (buf, size_t off, size_t val):
+  cdef unsigned char byte
+  cdef unsigned char *outp
+  cdef unsigned char *start
+  cdef size_t ret
 
-  ptr = buf
-  if sz > 0xff:
-    ptr[offs] = 0xff
-    memcpy (ptr + offs + 1, &sz, sizeof (sz))
-    return 1 + sizeof (sz)
-  else:
-    ptr[offs] = <unsigned char> (sz)
-    return 1
+  start = buf
+  outp = start = start + off
 
-def _pack_str (Packer xm, str value, tag):
+  while True:
+    byte = <unsigned char> (val & 0x7f)
+    val >>= 7
+
+    if val != 0:
+      byte |= 0x80
+
+    outp[0] = byte
+    outp += 1
+    if val == 0:
+      return outp - start
+
+def _pack_str (Packer xm, str value):
   cdef char *ptr
   cdef size_t size, offset, prev
   cdef unsigned int kind
@@ -215,12 +192,9 @@ def _pack_str (Packer xm, str value, tag):
   ptr = xm.wbytes
   offset = prev = xm.offset
 
-  if tag:
-    ptr[offset] = tpcode.STR
-    offset += 1
-
-  ptr[offset] = kind
-  offset += _write_size (xm.wbytes, offset + 1, size) + 1
+  ptr[offset] = tpcode.STR
+  ptr[offset + 1] = kind
+  offset += _write_uleb128 (xm.wbytes, offset + 2, size) + 2
 
   if (kind & 1) == 0:
     # UCS-2 or UCS-4 string.
@@ -233,23 +207,21 @@ def _pack_str (Packer xm, str value, tag):
   memcpy (ptr + offset, PyUnicode_DATA (value), size + kind)
   xm.bump (offset - prev + size + kind)
 
-cdef _pack_bytes (Packer xm, value, tag):
+cdef _pack_bytes (Packer xm, value):
   cdef char *ptr
   cdef const char *src
   cdef size_t offset, size, prev
 
   src = value
-  offset = prev = xm.offset
   size = len (value)
 
-  xm.resize (1 + sizeof (size_t) + size)
+  xm.resize (10 + 1 + size)
+  offset = prev = xm.offset
   ptr = xm.wbytes
 
-  if tag:
-    ptr[offset] = tpcode.BYTES if type (value) is bytes else tpcode.BYTEARRAY
-    offset += 1
+  ptr[offset] = tpcode.BYTES if type (value) is bytes else tpcode.BYTEARRAY
+  offset += _write_uleb128 (xm.wbytes, offset + 1, size) + 1
 
-  offset += _write_size (xm.wbytes, offset, size)
   memcpy (ptr + offset, src, size)
   xm.bump (offset - prev + size)
 
@@ -284,25 +256,6 @@ cdef int _int_code (obj):
     return tpcode.INT64
   return tpcode.NUM
 
-cdef int _type_code (obj, Packer xm):
-  ret = _inline_pack (obj)
-  if ret >= 0:
-    return ret
-  elif isinstance (obj, int):
-    return _int_code (obj)
-  elif isinstance (obj, float):
-    return _float_code (obj)
-
-  tmp = xm.id_cache.get (id (obj))
-  if tmp is not None:
-    return tpcode.BACKREF
-
-  typ = type (obj)
-  tmp = _dispatch_type_impl (xm.custom_packers, typ, direction.PACK)
-  if tmp is not None:
-    return tpcode.CUSTOM
-  return _TYPECODES_MAP.get (typ, tpcode.OTHER)
-
 cdef int _compute_basic_type (iterable):
   cdef int rv, tmp
 
@@ -328,154 +281,154 @@ cdef int _compute_basic_type (iterable):
 
   return rv
 
-cdef _pack_array (Packer xm, value, tag):
+cdef _pack_flat_iter (Packer xm, value, Py_ssize_t at):
+  cdef size_t tpoff, ix, pos
+  cdef bint wide
+
+  tpoff = xm.offset
+  xm.putb (0)
+  ulen = _write_uleb128 (xm.wbytes, xm.offset, len (value))
+  xm.bump (ulen + sizeof (size_t))
+
+  offsets: list = []
+  wide = False
+  fmt: str = "I"
+
+  for elem in value:
+    offsets.append (xm.offset)
+    if xm.offset >= INT32_MAX:
+      wide = True
+      fmt = "Q"
+
+    xm.pack (elem if at < 0 else elem[at])
+ 
+  xm.wbytes[tpoff] = b'Q' if wide else b'I'
+  xm.align_to (sizeof (long long) if wide else sizeof (int))
+  S_pack_into ("N", xm.wbytes, tpoff + 1 + ulen, xm.offset)
+  xm.resize (len (offsets) * (sizeof (long long) if wide else sizeof (int)))
+  xm.pack_struct (str (len (offsets)) + fmt, *offsets)
+
+cdef _pack_array (Packer xm, value):
   cdef size_t off
-  cdef Packer m2
   cdef int xtype
+  cdef unsigned int ulen
+  cdef size_t size
 
   xtype = _compute_basic_type (value)
-
-  if tag:
-    xm.putb (tpcode.LIST if type (value) is list else tpcode.TUPLE)
+  xm.putb (tpcode.LIST if type (value) is list else tpcode.TUPLE)
+  size = len (value)
+  xm.resize (11)   # 1 byte for typecode, 10 bytes for length.
 
   if xtype >= 0:
     # Inline integers or floats.
     xm.putb (xtype)
-    fmt = _BASIC_FMTS[xtype]
+    xm.bump (_write_uleb128 (xm.wbytes, xm.offset, size))
     xm.align_to (_BASIC_SIZES[xtype])
-    size = len (value)
-    xm.pack_struct (_WORD_FMT + str (size) + fmt, size, *value)
+    xm.resize (size * _BASIC_SIZES[xtype])
+    xm.pack_struct (str (size) + _BASIC_FMTS[xtype], *value)
     return
 
-  tpcodes = []
-  wide = False
-  m2 = xm.copy ()
+  _pack_flat_iter (xm, value, -1)
 
-  for elem in value:
-    ty = _type_code (elem, xm)
-    tpcodes.append (ty)
-    if ty in (tpcode.NONE, tpcode.TRUE, tpcode.FALSE):
-      continue
+cdef _write_hashes (Packer xm, list hashes, bint wide):
+  cdef char *ptr
+  cdef Py_ssize_t ix
 
-    off = m2.offset
-    m2.pack (elem, False)
-    if off >= _WIDE_LIMIT:
-      wide = True
+  ptr = xm.wbytes
+  ptr += xm.offset
 
-    tpcodes[-1] |= off << _OFF_SHIFT
+  if wide:
+    for ix in range (len (hashes)):
+      (<unsigned long long *>ptr)[ix] = hashes[ix][0]
+  else:
+    for ix in range (len (hashes)):
+      (<unsigned int *>ptr)[ix] = hashes[ix][0]
 
-  tplen = len (tpcodes)
-  base_fmt = "=c" + _WORD_FMT
-  code = b"Q" if wide else b"I"
+cdef _pack_set (Packer xm, value):
+  cdef size_t size, hv
+  cdef bint wide
 
-  xm.pack_struct (base_fmt, code, tplen)
-  xm.align_to (sizeof (long long) if wide else sizeof (int))
-  xm.pack_struct (str (tplen) + chr (code[0]), *tpcodes)
-  if not wide:
-    xm.align_to (sizeof (long long))
-  xm.bwrite (m2)
-
-# Helper to sort offsets.
-def _key_by_index (idx, obj):
-  return obj[idx]
-
-cdef _pack_set (Packer xm, value, tag):
-  cdef size_t offset, size, hv
-  cdef Packer m2
-
-  if tag:
-    xm.putb (tpcode.SET)
-
-  offset = xm.offset
+  xm.putb (tpcode.SET)
 
   if _compute_basic_type (value) >= 0:
-    # Set is packed as a sorted array of inline objects.
-    lst = tuple (sorted (value))
-    _pack_array (xm, lst, False)
+    xm.putb (1)   # Set contains inline objects.
+    _pack_array (xm, tuple (sorted (value)))
     return
 
-  offcodes = []
+  hashes: list = []
   wide = False
-  m2 = xm.copy ()
 
-  for elem in value:
-    ty = _type_code (elem, xm)
+  for index, elem in enumerate (value):
     hv = _xhash (elem, xm.hash_seed)
-    if hv >= _WIDE_LIMIT:
-      wide = True
+    if hv >= INT32_MAX:
+      wide =  True
 
-    offcodes.append ([hv, ty])
-    if ty in (tpcode.NONE, tpcode.TRUE, tpcode.FALSE):
-      continue
+    hashes.append ((hv, elem))
 
-    off = m2.offset
-    m2.pack (elem, False)
-    if off >= _WIDE_LIMIT:
-      wide = True
+  if wide:
+    xm.putb (b'Q')
+    size = sizeof (long long)
+  else:
+    xm.putb (b'I')
+    size = sizeof (int)
 
-    offcodes[-1][1] |= off << _OFF_SHIFT
+  hashes = sorted (hashes, key = lambda elem: elem[0])
+  xm.resize (10 + sizeof (size_t))   # uleb128 (10) + offset
+  xm.bump (_write_uleb128 (xm.wbytes, xm.offset, len (hashes)))
 
-  offcodes.sort (key = _partial (_key_by_index, 0))
-  offcodes = sum (offcodes, [])
-  tplen = len (offcodes)
-  base_fmt = "=c" + _WORD_FMT
-  code = b"Q" if wide else b"I"
+  xm.align_to (size)
+  xm.resize (size + size * len (hashes))
+  _write_hashes (xm, hashes, wide)
 
-  xm.pack_struct (base_fmt, code, tplen)
-  xm.align_to (sizeof (long long) if wide else sizeof (int))
-  xm.pack_struct (str (tplen) + chr (code[0]), *offcodes)
-  if not wide:
-    xm.align_to (sizeof (long long))
-  xm.bwrite (m2)
+  xm.bump (size * len (hashes))
+  xm.putb (tpcode.TUPLE)
+  _pack_flat_iter (xm, hashes, 1)
 
-cdef _pack_dict (Packer xm, value, tag):
-  cdef size_t hv
-  cdef Packer m2
+cdef _pack_dict (Packer xm, value):
+  cdef size_t hv, size, ix, prevoff
+  cdef bint wide
 
-  if tag:
-    xm.putb (tpcode.DICT)
+  hashes: list = []
+  fmt: str = "=I"
 
-  offset = xm.offset
-  offcodes = []
+  xm.resize (24)
+  xm.putb (tpcode.DICT)
+  xm.bump (_write_uleb128 (xm.wbytes, xm.offset, len (value)))
+
   wide = False
-  m2 = xm.copy ()
-
   for key, val in value.items ():
     hv = _xhash (key, xm.hash_seed)
-    t1 = _type_code (key, xm)
-    t2 = _type_code (val, xm)
-
-    if hv >= _WIDE_LIMIT:
+    if hv >= INT32_MAX:
       wide = True
+      fmt = "=Q"
 
-    offcodes.append ([hv, t1, t2])
-    if t1 not in (tpcode.NONE, tpcode.TRUE, tpcode.FALSE):
-      off = m2.offset
-      m2.pack (key, False)
-      if off >= _WIDE_LIMIT:
-        wide = True
-      offcodes[-1][1] |= off << _OFF_SHIFT
+    hashes.append ((hv, key, val))
 
-    if t2 not in (tpcode.NONE, tpcode.TRUE, tpcode.FALSE):
-      off = m2.offset
-      m2.pack (val, False)
-      if off >= _WIDE_LIMIT:
-        wide = True
-      offcodes[-1][2] |= off << _OFF_SHIFT
+  hashes = sorted (hashes, key = lambda elem: elem[0])
 
-  offcodes.sort (key = _partial (_key_by_index, 0))
-  offcodes = sum (offcodes, [])
+  if wide:
+    xm.putb (b'Q')
+    fmt = "=Q"
+    size = sizeof (long long)
+  else:
+    xm.putb (b'I')
+    size = sizeof (int)
 
-  tplen = len (offcodes)
-  base_fmt = "=c" + _WORD_FMT
-  code = b"Q" if wide else b"I"
+  prevoff = xm.offset
+  xm.bump (2 * sizeof (size_t))   # Ensure space for key and value tuples.
+  xm.align_to (size)
+  xm.resize (len (hashes) * size)
 
-  xm.pack_struct (base_fmt, code, tplen)
-  xm.align_to (sizeof (long long) if wide else sizeof (int))
-  xm.pack_struct (str (tplen) + chr (code[0]), *offcodes)
-  if not wide:
-    xm.align_to (sizeof (long long))
-  xm.bwrite (m2)
+  _write_hashes (xm, hashes, wide)
+  xm.bump (size * len (hashes))
+  S_pack_into ("N", xm.wbytes, prevoff, xm.offset)
+
+  xm.putb (tpcode.TUPLE)
+  _pack_flat_iter (xm, hashes, 1)
+
+  S_pack_into ("N", xm.wbytes, prevoff + sizeof (size_t), xm.offset)
+  xm.putb (tpcode.TUPLE)
+  _pack_flat_iter (xm, hashes, 2)
 
 cdef inline object _encode_str (object x):
   return PyUnicode_AsEncodedString (x, "utf8", cy.NULL)
@@ -491,8 +444,8 @@ cdef _write_secret (Packer xm, str x):
     md = _encode_str (HMAC(xm.import_key, val, _HASH_METHOD).hexdigest ())
     xm.pack_struct ("I%ds" % len (md), len (md), md)
 
-  xm.resize (sizeof (size_t) + sz + 1)
-  xm.bump (_write_size (xm.wbytes, xm.offset, sz))
+  xm.resize (sz + 10 + 1)
+  xm.bump (_write_uleb128 (xm.wbytes, xm.offset, sz))
   xm.bwrite (val)
 
 cdef inline _write_type (Packer xm, typ):
@@ -501,7 +454,7 @@ cdef inline _write_type (Packer xm, typ):
 cdef dict _obj_vars (obj):
   ret = getattr (obj, "__dict__", _SENTINEL)
   if ret is not _SENTINEL:
-    return ret
+    return ret if type (ret) is dict else dict (ret)
 
   ret = getattr (obj, "__slots__", _SENTINEL)
   if ret is not _SENTINEL:
@@ -515,43 +468,12 @@ cdef dict _obj_vars (obj):
 
   raise TypeError ("cannot get attributes from object of type %r" % type (obj))
 
-cdef _pack_generic (Packer xm, value, tag):
+cdef _pack_generic (Packer xm, value):
   cdef size_t off, extra
-  cdef Packer m2
 
-  if tag:
-    xm.putb (tpcode.OTHER)
-
-  attrs = _obj_vars (value)
+  xm.putb (tpcode.OTHER)
   _write_type (xm, type (value))
-  m2 = xm.copy ()
-  data = []
-  wide = 0
-
-  for key, val in attrs.items ():
-    key = _encode_str (key)
-    slen = len (key)
-    if slen >= _WIDE_LIMIT:
-      wide = 1
-
-    ty = _type_code (val, xm)
-    data.extend ((slen, ty))
-
-    if ty not in (tpcode.NONE, tpcode.TRUE, tpcode.FALSE):
-      off = m2.offset
-      m2.pack (val, False)
-      data[-1] |= off << _OFF_SHIFT
-      if off >= _WIDE_LIMIT:
-        wide = 1
-
-  keys = _encode_str ("".join (attrs.keys ()))
-  nelem = len (data)
-  xm.align_to (sizeof (long long))
-  xm.pack_struct ("II" + str (nelem) + ("Q" if wide else "I"),
-                  ((nelem << 1) | wide), len (keys), *data)
-  xm.bwrite (keys)
-  xm.align_to (sizeof (long long))
-  xm.bwrite (m2)
+  xm.pack (_obj_vars (value))
 
 cdef inline size_t _upsize (size_t value):
   # Round up 'value' to the next power of 2.
@@ -635,17 +557,6 @@ cdef class Packer:
     self.wlen = self.offset
     self.import_key =  _get_import_key (import_key)
 
-  cpdef copy (self):
-    """
-    Create an equivalent copy of the Packer. Useful when packing complex
-    objects that need constituent members to be packed separatedly without
-    modifying the initial Packer.
-    """
-    return Packer (0, id_cache = self.id_cache.copy (),
-                   hash_seed = self.hash_seed,
-                   custom_packers = self.custom_packers,
-                   initial_size = 8, import_key = self.import_key)
-
   cpdef resize (self, size_t extra):
     """
     Resize the underlying byte stream so that it has enough room for an
@@ -678,27 +589,27 @@ cdef class Packer:
     self.zpad (_get_padding (self.offset, size))
 
   @cy.final
-  cdef _pack_struct (self, fmt, tuple args):
+  cdef _pack_struct (self, fmt, size_t offset, tuple args):
     cdef size_t size
 
     size = S_calcsize (fmt)
-    self.resize (size)
-    S_pack_into (fmt, self.wbytes, self.wlen, *args)
-    self.bump (size)
+    self.resize (offset + size)
+    S_pack_into (fmt, self.wbytes, offset, *args)
+    return size
 
   def pack_struct (self, fmt, *args):
     "Same as calling ``struct.pack_into`` with the byte stream and offset."
-    self._pack_struct (fmt, args)
+    self.bump (self._pack_struct (fmt, self.wlen, args))
+
+  def pack_struct_at (self, fmt, pos, *args):
+    "Same as `pack_struct`, only this lets you specific the offset."
+    self._pack_struct (fmt, pos, args)
 
   cpdef bwrite (self, obj):
     """
     Write a binary object to the stream.
-    If ``obj`` is itself a Packer, then concatenate its stream to ours.
     """
     cdef size_t size
-
-    if isinstance (obj, Packer):
-      obj = (<Packer>obj).as_bytearray ()
 
     size = len (obj)
     self.resize (size)
@@ -709,10 +620,9 @@ cdef class Packer:
     "Return a copy of the Packer's byte stream so far."
     return self.wbytes[:self.wlen]
 
-  cpdef pack (self, obj, tag = True):
+  cpdef pack (self, obj):
     """
     Pack an arbitrary object in the byte stream.
-    if ``tag`` is true, a code indicating the object's type is prepended.
     """
     cdef type ty
     cdef size_t prev
@@ -721,8 +631,8 @@ cdef class Packer:
     obj_id = id (obj)
     off = self.id_cache.get (obj_id)
     if off is not None:
-      self.putb (tpcode.BACKREF) if tag else None
-      self.pack_struct (_WORD_PACK, off)
+      self.putb (tpcode.BACKREF)
+      self.pack_struct ("N", off)
       return self.offset - prev
 
     ty = type (obj)
@@ -732,7 +642,7 @@ cdef class Packer:
     try:
       fn = _BASIC_PACKERS.get (ty, None)
       if fn:
-        fn (self, obj, tag)
+        fn (self, obj)
         return self.offset - prev
 
       code = _inline_pack (obj)
@@ -740,16 +650,14 @@ cdef class Packer:
         self.putb (code)
         return 1
 
-      fn = _dispatch_type (ty, direction.PACK)
+      fn = _dispatch_type_impl (self.custom_packers, ty, direction.PACK)
       if fn is not None:
-        if tag:
-          self.putb (tpcode.CUSTOM)
-
+        self.putb (tpcode.CUSTOM)
         _write_type (self, ty)
         self.align_to (sizeof (long long))
         fn (self, obj)
       else:
-        _pack_generic (self, obj, tag)
+        _pack_generic (self, obj)
 
       return self.offset - prev
     except Exception:
@@ -762,12 +670,20 @@ cdef class Packer:
     """
     _write_secret (<Packer>self, value)
 
+  def getoff (self):
+    "Get the current offset in the packer."
+    return self.offset
+
+  @staticmethod
+  def struct_size (fmt):
+    return S_calcsize (fmt)
+
 cdef inline object _cnum_unpack (Proxy self, size_t offs, cnum value):
   cdef size_t extra
 
   extra = _get_padding (offs, sizeof (value))
   self._assert_len (offs + extra + sizeof (value))
-  return (<const cnum*> (self.base + offs + extra))[0]
+  return (<const cnum *> (self.base + offs + extra))[0]
 
 cdef class Proxy:
   """
@@ -847,7 +763,7 @@ cdef class Proxy:
     return self.max_size
 
   @cy.final
-  cdef object _assert_len (self, size_t size):
+  cdef void _assert_len (self, size_t size):
     if self.max_size < size:
       raise IndexError ("buffer too small")
 
@@ -864,6 +780,13 @@ cdef class Proxy:
   @staticmethod
   def struct_size (fmt):
     return S_calcsize (fmt)
+
+  @cy.final
+  cdef unsigned char _byte_at (self, size_t ix):
+    if ix >= self.max_size:
+      raise IndexError ("buffer too small")
+
+    return self.base[ix]
 
   def __getitem__ (self, ix):
     "Return the byte at position ``ix``."
@@ -894,14 +817,7 @@ cdef class Proxy:
     elif code == tpcode.STR:
       return ProxyStr._make (self, offset)
     elif code in (tpcode.BYTES, tpcode.BYTEARRAY):
-      self._assert_len (offset + 1)
-      size = self.base[offset]
-      if size == 0xff:
-        self._assert_len (offset + 1 + sizeof (size))
-        memcpy (&size, self.base + offset + 1, sizeof (size))
-        offset += sizeof (size)
-
-      offset += 1
+      offset = _read_uleb128 (self, offset, &size)
       mbx = self.mbuf[offset:offset + size]
       return bytes(mbx) if code == tpcode.BYTES else bytearray(mbx)
     elif code == tpcode.NONE:
@@ -931,11 +847,6 @@ cdef class Proxy:
                  offset + _get_padding (offset, sizeof (long long)))
     raise TypeError ("Cannot unpack typecode %r" % code)
 
-  cdef object _unpack_with_data (self, unsigned long long data,
-                                 ProxyList indices):
-    return self._unpack_with_code ((data >> _OFF_SHIFT) + indices.offset +
-                                   indices.sub_off, data & _CODE_MASK)
-
   @cy.final
   cdef object _unpack (self, size_t offs):
     self._assert_len (offs)
@@ -948,13 +859,6 @@ cdef class Proxy:
   def unpack_from (self, off):
     "Unpack an object from the proxy at a specified offset."
     return self._unpack (off)
-
-  def unpack_as (self, code, off = None):
-    """
-    Unpack an object from the proxy using a specific type, and (optionally),
-    at a specific offset.
-    """
-    return self._unpack_with_code (self.offset if off is None else off, code)
 
   def read_secret (self, off = None):
     cdef size_t offset
@@ -1065,6 +969,22 @@ cdef object _builtin_acas (void *buf, Py_ssize_t pos, object exp,
   else:
     return _builtin_acas_impl[double] (<double *>buf + pos, exp, nval)
 
+cdef size_t _read_uleb128 (Proxy proxy, size_t off, size_t *valp):
+  cdef size_t ret, shift
+  cdef unsigned char byte
+
+  shift = ret = 0
+  while True:
+    byte = proxy._byte_at (off)
+    ret |= (byte & 0x7f) << shift
+    off += 1
+
+    if not (byte & 0x80):
+      valp[0] = ret
+      return off
+
+    shift += 7
+
 cdef class ProxyList:
   cdef Proxy proxy
   cdef size_t offset
@@ -1085,31 +1005,25 @@ cdef class ProxyList:
     self.proxy = proxy
     self.offset = off
 
-    ty = self.proxy[self.offset]
+    self.code = ty = self.proxy[self.offset]
+    self.offset = _read_uleb128 (self.proxy, self.offset + 1, &self.size)
+
     if _is_inline_code (ty):
       # Inline objects: Integers or floats.
       esz = _BASIC_SIZES[ty]
-      self.offset += _get_padding (self.offset + 1, esz) + 1
-      self.proxy._assert_len (self.offset + sizeof (size_t))
-      self.size = (<size_t *> (self.proxy.base + self.offset))[0]
-      self.offset += sizeof (size_t)
+      self.offset += _get_padding (self.offset, esz)
       self.sub_off = 0
       self.proxy._assert_len (self.offset + self.size * esz)
     else:
       # Indirect references to objects.
-      esz = sizeof (int) if ty == b"I" else sizeof (long long)
-      self.proxy._assert_len (self.offset + 1 + sizeof (size_t))
-      memcpy (&self.size, self.proxy.base + self.offset + 1, sizeof (size_t))
-      self.offset += sizeof (size_t) + 1
-      self.offset += _get_padding (self.offset, esz)
+      self.proxy._assert_len (self.offset + sizeof (self.offset))
+      self.sub_off = self.offset + sizeof (self.offset)
+      memcpy (&self.offset, self.proxy.base + self.offset,
+              sizeof (self.offset))
+      proxy._assert_len (self.offset + self.size *
+                         (sizeof (int) if self.code == b'I'
+                                       else sizeof (long long)))
 
-      self.sub_off = self.size * esz
-      if esz == sizeof (int):
-        self.sub_off += _get_padding (self.offset + self.sub_off,
-                                      sizeof (long long))
-      self.proxy._assert_len (self.offset + self.sub_off)
-
-    self.code = ty
     self.step = 1
     self.mutable = mutable and self.proxy.rdwr
     return self
@@ -1118,24 +1032,62 @@ cdef class ProxyList:
     return self.size
 
   @cy.final
-  cdef inline object _c_index (self, Py_ssize_t pos, unsigned int code):
+  cdef void* _c_ptr (self, size_t idx, unsigned int *codep):
+    cdef void *base
+    cdef size_t offset, extra
+    cdef unsigned int code
+
+    base = self.proxy.base + self.offset
+
+    if not _is_inline_code (self.code):
+      if self.code == b'I':
+        offset = (<unsigned int *>base)[idx]
+      else:
+        offset = (<unsigned long long *>base)[idx]
+
+      code = <unsigned char>self.proxy.base[offset]
+      codep[0] = code
+
+      if not _is_inline_code (code):
+        return self.proxy.base + offset
+
+      extra = _get_padding (offset + 1, _BASIC_SIZES[code])
+      self.proxy._assert_len (offset + extra + 1 + _BASIC_SIZES[code])
+      return self.proxy.base + offset + extra + 1
+
+    codep[0] = self.code
+    if self.code == tpcode.INT8:
+      return (<signed char *>base) + idx
+    elif self.code == tpcode.INT16:
+      return (<short *>base) + idx
+    elif self.code == tpcode.INT32:
+      return (<int *>base) + idx
+    elif self.code == tpcode.INT64:
+      return (<long long *>base) + idx
+    elif self.code == tpcode.FLOAT32:
+      return (<float *>base) + idx
+    else:
+      return (<double *>base) + idx
+
+  @cy.final
+  cdef inline object _c_index (self, Py_ssize_t pos):
     cdef char *ptr
-    cdef unsigned long long data
+    cdef size_t offset
 
     pos *= self.step
     ptr = self.proxy.base + self.offset
 
-    if _is_inline_code (code):
+    if _is_inline_code (self.code):
       if self.mutable:
         atomic_fence_acq ()
 
-      return _builtin_read (ptr, pos, code)
+      return _builtin_read (ptr, pos, self.code)
     elif self.code == b"I":
-      data = (<unsigned int *>ptr)[pos]
+      offset = (<unsigned int *>ptr)[pos]
     else:
-      data = (<unsigned long long *>ptr)[pos]
+      offset = (<unsigned long long *>ptr)[pos]
 
-    return self.proxy._unpack_with_data (data, self)
+    return self.proxy._unpack (offset)
 
   @cy.cdivision (True)
   def __getitem__ (self, idx):
@@ -1153,7 +1105,7 @@ cdef class ProxyList:
       elif pos >= n:
         raise IndexError ("index out of bounds")
 
-      return self._c_index (pos, self.code)
+      return self._c_index (pos)
     elif not isinstance (idx, slice):
       raise TypeError ("index must be an integer or slice")
 
@@ -1246,15 +1198,16 @@ cdef class ProxyList:
 
   def __iter__ (self):
     cdef size_t i
-    cdef unsigned int code
 
-    code = self.code
     for i in range (self.size):
-      yield self._c_index (i, code)
+      yield self._c_index (i)
 
   @cy.final
   cdef str _to_str (ProxyList self, dict id_map):
     cdef ProxyList other
+
+    if len (self) == 0:
+      return '[]'
 
     id_map[self.offset] = self
     sio = StringIO()
@@ -1308,15 +1261,13 @@ cdef class ProxyList:
 
   def index (self, value, start = 0, stop = WORD_MAX):
     cdef size_t istart, istop, n
-    cdef unsigned int code
 
     istart, istop = start, stop
     n = self.size
     istop = min (istop, n)
-    code = self.code
 
     while istart < istop:
-      if self._c_index (istart, code) == value:
+      if self._c_index (istart) == value:
         return istart
       istart += 1
 
@@ -1324,22 +1275,18 @@ cdef class ProxyList:
 
   def __contains__ (self, value):
     cdef size_t i
-    cdef unsigned int code
 
-    code = self.code
     for i in range (self.size):
-      if self._c_index (i, code) == value:
+      if self._c_index (i) == value:
         return True
     return False
 
   def count (self, value):
     cdef size_t i, n
-    cdef unsigned int code
 
     n = 0
-    code = self.code
     for i in range (self.size):
-      if self._c_index (i, code) == value:
+      if self._c_index (i) == value:
         n += 1
     return n
 
@@ -1361,7 +1308,7 @@ cdef class ProxyList:
       return 1
 
     for i in range (min (alen, blen)):
-      a = self._c_index (i, self.code)
+      a = self._c_index (i)
       b = x[i]
 
       if a is b:
@@ -1432,13 +1379,8 @@ cdef class ProxyStr:
     self.proxy = proxy
 
     orig_kind = kind = self.proxy[off]
-    size = self.proxy[off + 1]
-    if size == 0xff:
-      self.proxy._assert_len (off + 2 + sizeof (size))
-      memcpy (&size, self.proxy.base + off + 2, sizeof (size))
-      off += sizeof (size_t)
+    off = _read_uleb128 (proxy, off + 1, &size)
 
-    off += 2
     if (kind & 1) == 0:
       off += _get_padding (off, kind)
     else:
@@ -1779,31 +1721,32 @@ cdef int _cnum_find_sorted (const unsigned char *ptr, size_t n, obj,
 
 @cy.cdivision (True)
 @cy.nogil
-cdef size_t _find_hidx (hidx_type hidxs, size_t hval, size_t n):
+cdef size_t _find_hidx (const hidx_type *hidxs, size_t hval, size_t n):
   cdef size_t i, step, tmp
 
   i = 0
   while i < n:
     step = (i + n) >> 1
-    tmp = hidxs[step].values[0]
+    tmp = hidxs[step]
 
     if tmp == hval:
       while step > 0:
-        if hidxs[step - 1].values[0] != tmp:
+        if hidxs[step - 1] != tmp:
           break
         step -= 1
       return step + 1
     elif tmp > hval:
+      # New range is from [0 .. step - 1]
       n = step - 1
       step = min (step >> 2, <size_t>512 // sizeof (hidxs[0]))
       while step > 0:
-        tmp = hidxs[n].values[0]
+        tmp = hidxs[n]
         if tmp > hval:
           step -= 1
           n -= 1
         elif tmp == hval:
           while n > 0:
-            if hidxs[n - 1].values[0] != tmp:
+            if hidxs[n - 1] != tmp:
               break
             n -= 1
           return n + 1
@@ -1811,16 +1754,17 @@ cdef size_t _find_hidx (hidx_type hidxs, size_t hval, size_t n):
           return 0
       n += 1
     else:
+      # New range is [step + 1 .. N]
       i = step + 1
       step = min (step >> 2, <size_t>512 // sizeof (hidxs[0]))
       while step > 0:
-        tmp = hidxs[i].values[0]
+        tmp = hidxs[i]
         if tmp < hval:
           step -= 1
           i += 1
         elif tmp == hval:
           while i > 0:
-            if hidxs[i - 1].values[0] != tmp:
+            if hidxs[i - 1] != tmp:
               break
             i -= 1
           return i + 1
@@ -1828,25 +1772,23 @@ cdef size_t _find_hidx (hidx_type hidxs, size_t hval, size_t n):
           return 0
   return 0
 
-cdef size_t _find_obj_by_hidx (hidx_type hidxs, size_t ix, size_t n,
-                               obj, ProxyList indices):
+cdef size_t _find_obj_by_hidx (const hidx_type *hidxs, size_t ix, size_t n,
+                               obj, ProxyList keys):
   cdef size_t hval
-  cdef unsigned long long data
 
   if ix == 0:
     return ix
 
   ix -= 1
-  hval = hidxs[ix].values[0]
+  hval = hidxs[ix]
 
   while 1:
-    data = hidxs[ix].values[1]
-    key = indices.proxy._unpack_with_data (data, indices)
-
+    key = keys._c_index (ix)
     ix += 1
+
     if obj == key:
       return ix
-    elif ix == n or hidxs[ix].values[0] != hval:
+    elif ix == n or hidxs[ix] != hval:
       return 0
 
 ################################
@@ -1965,15 +1907,31 @@ cdef bint _cnum_set_includes (const void *p1, size_t l1, const void *p2,
 
 cdef class ProxySet:
   cdef ProxyList indices
+  cdef unsigned int hcode
+  cdef void* hashes
 
   @staticmethod
   cdef ProxySet _make (Proxy proxy, size_t offset):
     cdef ProxySet self
+    cdef size_t size, esz
+    cdef unsigned char code
 
     self = ProxySet.__new__ (ProxySet)
-    self.indices = ProxyList._make (proxy, offset, False)
-    if not _is_inline_code (self.indices.code):
-      self.indices.size >>= 1
+    code = proxy[offset]
+    if code == 1:
+      self.indices = proxy._unpack (offset + 1)
+      self.hashes = cy.NULL
+      self.hcode = self.indices.code
+    else:
+      self.hcode = code
+      esz = sizeof (int) if code == b'I' else sizeof (long long)
+      offset = _read_uleb128 (proxy, offset + 1, &size)
+      offset += _get_padding (offset, esz)
+      self.hashes = <char *>proxy.base + offset
+      self.indices = proxy._unpack (offset + esz * size)
+      if size != self.indices.size:
+        raise ValueError ('set and indices length mismatch')
+
     return self
 
   def __len__ (self):
@@ -1987,7 +1945,7 @@ cdef class ProxySet:
     cdef set out
 
     ix1, ix2 = self.indices, pset.indices
-    if ix1.code == ix2.code and _is_inline_code (ix1.code):
+    if self.hcode == pset.hcode and _is_inline_code (self.hcode):
       out = set ()
       p1 = <const unsigned char *> (ix1.proxy.base + ix1.offset)
       p2 = <const unsigned char *> (ix2.proxy.base + ix2.offset)
@@ -2017,7 +1975,7 @@ cdef class ProxySet:
     cdef set out
 
     ix1, ix2 = self.indices, pset.indices
-    if ix1.code == ix2.code and _is_inline_code (ix1.code):
+    if self.hcode == pset.hcode and _is_inline_code (self.hcode):
       out = set ()
       p1 = <const unsigned char *> (ix1.proxy.base + ix1.offset)
       p2 = <const unsigned char *> (ix2.proxy.base + ix2.offset)
@@ -2047,7 +2005,7 @@ cdef class ProxySet:
     cdef set out
 
     ix1, ix2 = self.indices, pset.indices
-    if ix1.code == ix2.code and _is_inline_code (ix1.code):
+    if self.hcode == pset.hcode and _is_inline_code (self.hcode):
       out = set ()
       p1 = <const unsigned char *> (ix1.proxy.base + ix1.offset)
       p2 = <const unsigned char *> (ix2.proxy.base + ix2.offset)
@@ -2077,7 +2035,7 @@ cdef class ProxySet:
     cdef set out
 
     ix1, ix2 = self.indices, pset.indices
-    if ix1.code == ix2.code and _is_inline_code (ix1.code):
+    if self.hcode == pset.hcode and _is_inline_code (self.hcode):
       out = set ()
       p1 = <const unsigned char *> (ix1.proxy.base + ix1.offset)
       p2 = <const unsigned char *> (ix2.proxy.base + ix2.offset)
@@ -2102,59 +2060,39 @@ cdef class ProxySet:
   def __contains__ (self, value):
     cdef ProxyList indices
     cdef Proxy proxy
-    cdef unsigned int code
     cdef size_t n, ix
-    cdef const array_2I *iarray
-    cdef const array_2Q *qarray
+    cdef const unsigned int *iarray
+    cdef const unsigned long long *qarray
     cdef const unsigned char *ptr
 
     indices = self.indices
     proxy = indices.proxy
-    code = indices.code
     n = indices.size
     ptr = <const unsigned char *> (proxy.base + indices.offset)
 
-    if code == tpcode.INT8:
+    if self.hcode == tpcode.INT8:
       return _cnum_find_sorted[cy.schar] (ptr, n, value, 0, 0)
-    elif code == tpcode.INT16:
+    elif self.hcode == tpcode.INT16:
       return _cnum_find_sorted[short] (ptr, n, value, 0, 0)
-    elif code == tpcode.INT32:
+    elif self.hcode == tpcode.INT32:
       return _cnum_find_sorted[int] (ptr, n, value, 0, 0)
-    elif code == tpcode.INT64:
+    elif self.hcode == tpcode.INT64:
       return _cnum_find_sorted[cy.longlong] (ptr, n, value, 0, 0)
-    elif code == tpcode.FLOAT32:
+    elif self.hcode == tpcode.FLOAT32:
       return _cnum_find_sorted[float] (ptr, n, value, 0, 0)
-    elif code == tpcode.FLOAT64:
+    elif self.hcode == tpcode.FLOAT64:
       return _cnum_find_sorted[double] (ptr, n, value, 0, 0)
-    elif code == b"I":
-      iarray = <const array_2I *>ptr
+    elif self.hcode == b"I":
+      iarray = <const unsigned int *>self.hashes
       ix = _find_hidx (iarray, _xhash (value, proxy.hash_seed), n)
       return _find_obj_by_hidx (iarray, ix, n, value, indices) != 0
     else:
-      qarray = <const array_2Q *>ptr
+      qarray = <const unsigned long long *>self.hashes
       ix = _find_hidx (qarray, _xhash (value, proxy.hash_seed), n)
       return _find_obj_by_hidx (qarray, ix, n, value, indices) != 0
 
   def __iter__ (self):
-    cdef unsigned int code
-    cdef char *ptr
-    cdef unsigned long long data
-    cdef size_t i
-
-    code = self.indices.code
-    ptr = self.indices.proxy.base + self.indices.offset
-
-    if _is_inline_code (code):
-      for i in range (self.indices.size):
-        yield _builtin_read (ptr, i, code)
-    else:
-      for i in range (self.indices.size):
-        if code == b"I":
-          data = (<const array_2I *>ptr)[i].values[1]
-        else:
-          data = (<const array_2Q *>ptr)[i].values[1]
-
-        yield self.indices.proxy._unpack_with_data (data, self.indices)
+    return iter (self.indices)
 
   def union (self, *args):
     if not args:
@@ -2248,8 +2186,8 @@ cdef class ProxySet:
     cdef ProxySet ps
     cdef ProxyList ix1, ix2
 
-    if (_is_inline_code (self.indices.code) and isinstance (x, ProxySet) and
-        (<ProxySet>x).indices.code == self.indices.code):
+    if (_is_inline_code (self.hcode) and isinstance (x, ProxySet) and
+        (<ProxySet>x).hcode == self.hcode):
       ps = <ProxySet>x
       ix1, ix2 = self.indices, ps.indices
       return (ps.indices.size == self.indices.size and
@@ -2274,24 +2212,24 @@ cdef class ProxySet:
     cdef const void *p1
     cdef const void *p2
 
-    if (_is_inline_code (self.indices.code) and
+    if (_is_inline_code (self.hcode) and
         isinstance (x, ProxySet) and
-        (<ProxySet>x).indices.code == self.indices.code):
+        (<ProxySet>x).hcode == self.hcode):
       ix1, ix2 = self.indices, (<ProxySet>x).indices
       p1 = <const void *> (ix1.proxy.base + ix1.offset)
       p2 = <const void *> (ix2.proxy.base + ix2.offset)
 
       if ix1.size > ix2.size:
         ret = False
-      elif self.indices.code == tpcode.INT8:
+      elif self.hcode == tpcode.INT8:
         ret = _cnum_set_includes[cy.schar] (p2, ix2.size, p1, ix1.size, 0)
-      elif self.indices.code == tpcode.INT16:
+      elif self.hcode == tpcode.INT16:
         ret = _cnum_set_includes[short] (p2, ix2.size, p1, ix1.size, 0)
-      elif self.indices.code == tpcode.INT32:
+      elif self.hcode == tpcode.INT32:
         ret = _cnum_set_includes[int] (p2, ix2.size, p1, ix1.size, 0)
-      elif self.indices.code == tpcode.INT64:
+      elif self.hcode == tpcode.INT64:
         ret = _cnum_set_includes[cy.longlong] (p2, ix2.size, p1, ix1.size, 0)
-      elif self.indices.code == tpcode.FLOAT32:
+      elif self.hcode == tpcode.FLOAT32:
         ret = _cnum_set_includes[float] (p2, ix2.size, p1, ix1.size, 0)
       else:
         ret = _cnum_set_includes[double] (p2, ix2.size, p1, ix1.size, 0)
@@ -2346,64 +2284,60 @@ cdef class ProxySet:
 
 ########################################
 
-cdef inline object _ProxyDict_iter_key (hidx_type hidxs, size_t ix, iobj):
-  cdef ProxyList indices
-
-  indices = <ProxyList>iobj
-  return indices.proxy._unpack_with_data (hidxs[ix].values[1], indices)
-
-cdef inline object _ProxyDict_iter_val (hidx_type hidxs, size_t ix, iobj):
-  cdef ProxyList indices
-
-  indices = <ProxyList>iobj
-  return indices.proxy._unpack_with_data (hidxs[ix].values[2], indices)
-
-cdef inline object _ProxyDict_iter_both (hidx_type hidxs, size_t ix, iobj):
-  cdef ProxyList indices
-
-  indices = <ProxyList>iobj
-  return (indices.proxy._unpack_with_data (hidxs[ix].values[1], indices),
-          indices.proxy._unpack_with_data (hidxs[ix].values[2], indices))
-
 cdef class ProxyDict:
-  cdef ProxyList indices
+  cdef void* hashes
+  cdef ProxyList tkeys
+  cdef ProxyList tvalues
+  cdef bint wide
 
   @staticmethod
   cdef ProxyDict _make (Proxy proxy, size_t offset):
     cdef ProxyDict self
+    cdef size_t size
+    cdef size_t kv_off[2]
+    cdef unsigned char code
 
     self = ProxyDict.__new__ (ProxyDict)
-    self.indices = ProxyList._make (proxy, offset, False)
-    self.indices.size //= 3
+    offset = _read_uleb128 (proxy, offset, &size)
+    self.wide = proxy[offset] == 81   # equal to 'Q'
+    proxy._assert_len (offset + 1 + 2 * sizeof (size_t))
+    memcpy (&kv_off[0], proxy.base + offset + 1, sizeof (kv_off))
+    offset += sizeof (kv_off)
+    offset += _get_padding (offset + 1, sizeof (long long)
+                                        if self.wide else sizeof (int)) + 1
+    self.tkeys = proxy._unpack (kv_off[0])
+    self.tvalues = proxy._unpack (kv_off[1])
+    self.hashes = proxy.base + offset
+    proxy._assert_len (offset + self.tkeys.size *
+                       (sizeof (long long) if self.wide else sizeof (int)))
+
     return self
 
   def __len__ (self):
-    return self.indices.size
+    return self.tkeys.size
 
   @cy.final
   cdef object _c_get (self, key, dfl):
-    cdef ProxyList indices
     cdef Proxy proxy
     cdef size_t n, ix
-    cdef const array_3I *iarray
-    cdef const array_3Q *qarray
+    cdef const unsigned int *iarray
+    cdef const unsigned long long *qarray
 
-    indices = self.indices
-    proxy = indices.proxy
-    n = indices.size
+    proxy = self.tkeys.proxy
+    n = self.tkeys.size
 
-    if indices.code == b"I":
-      iarray = <const array_3I *> (proxy.base + indices.offset)
+    if not self.wide:
+      iarray = <const unsigned int *>self.hashes
       ix = _find_hidx (iarray, _xhash (key, proxy.hash_seed), n)
-      ix = _find_obj_by_hidx (iarray, ix, n, key, indices)
+      ix = _find_obj_by_hidx (iarray, ix, n, key, self.tkeys)
       if ix != 0:
-        return proxy._unpack_with_data (iarray[ix - 1].values[2], indices)
+        return self.tvalues._c_index (ix - 1)
     else:
-      qarray = <const array_3Q *> (proxy.base + indices.offset)
+      qarray = <const unsigned long long *>self.hashes
       ix = _find_hidx (qarray, _xhash (key, proxy.hash_seed), n)
-      ix = _find_obj_by_hidx (qarray, ix, n, key, indices)
+      ix = _find_obj_by_hidx (qarray, ix, n, key, self.tkeys)
       if ix != 0:
-        return proxy._unpack_with_data (qarray[ix - 1].values[2], indices)
+        return self.tvalues._c_index (ix - 1)
 
     return dfl
 
@@ -2419,67 +2353,27 @@ cdef class ProxyDict:
   def get (self, key, dfl = None):
     return self._c_get (key, dfl)
 
-  def _iter_impl (self, size_t wfn):
-    cdef dict_iter_fn fn
-    cdef size_t i
-    cdef ProxyList indices
-
-    indices = self.indices
-    fn = fn_caster(wfn).bfn
-
-    for i in range (indices.size):
-      yield fn (indices.proxy.base + indices.offset, i, indices)
-
   def keys (self):
-    cdef fn_caster caster
-
-    if self.indices.code == b"I":
-      caster.bfn = <dict_iter_fn>_ProxyDict_iter_key["const array_3I*"]
-    else:
-      caster.bfn = <dict_iter_fn>_ProxyDict_iter_key["const array_3Q*"]
-    return self._iter_impl (caster.wfn)
+    return iter (self.tkeys)
 
   def values (self):
-    cdef fn_caster caster
-
-    if self.indices.code == b"I":
-      caster.bfn = <dict_iter_fn>_ProxyDict_iter_val["const array_3I*"]
-    else:
-      caster.bfn = <dict_iter_fn>_ProxyDict_iter_val["const array_3Q*"]
-    return self._iter_impl (caster.wfn)
+    return iter (self.tvalues)
 
   def items (self):
-    cdef fn_caster caster
+    cdef size_t ix
 
-    if self.indices.code == b"I":
-      caster.bfn = <dict_iter_fn>_ProxyDict_iter_both["const array_3I*"]
-    else:
-      caster.bfn = <dict_iter_fn>_ProxyDict_iter_both["const array_3Q*"]
-    return self._iter_impl (caster.wfn)
+    ix = 0
+    while ix < self.tkeys.size:
+      yield (self.tkeys._c_index (ix), self.tvalues._c_index (ix))
+      ix += 1
 
   @cy.final
   cdef _todict (self):
-    cdef dict_iter_fn kget, vget
-    cdef ProxyList indices
-    cdef void *ptr
-
-    rv = {}
     unproxy_ = unproxy
-    if self.indices.code == b"I":
-      kget = <dict_iter_fn>_ProxyDict_iter_key["const array_3I*"]
-      vget = <dict_iter_fn>_ProxyDict_iter_val["const array_3I*"]
-    else:
-      kget = <dict_iter_fn>_ProxyDict_iter_key["const array_3Q*"]
-      vget = <dict_iter_fn>_ProxyDict_iter_val["const array_3Q*"]
+    ret: dict = {}
 
-    indices = self.indices
-    ptr = indices.proxy.base + indices.offset
-    for i in range (indices.size):
-      key = kget (ptr, i, indices)
-      val = vget (ptr, i, indices)
-      rv[unproxy_ (key)] = unproxy_ (val)
-
-    return rv
+    for key, val in self.items ():
+      ret[unproxy_ (key)] = unproxy_ (val)
 
   def __iter__ (self):
     return self.keys ()
@@ -2488,11 +2382,14 @@ cdef class ProxyDict:
     return dict (self.items ())
 
   cdef size_t _hash (ProxyDict self):
-    cdef size_t ret
+    cdef size_t ret, seed
 
     ret = 0x3fc01436
-    for key in self.keys ():
-      ret = _mix_hash (ret, _xhash (key, self.indices.proxy.hash_seed))
+    seed = self.tkeys.proxy.hash_seed
+
+    for key, val in self.items ():
+      ret = _mix_hash (ret, _xhash (key, seed))
+      ret = _mix_hash (ret, _xhash (val, seed))
 
     return ret
 
@@ -2519,22 +2416,17 @@ cdef class ProxyDict:
 #####################################
 
 cdef class ProxyDescrBuiltin:
+  cdef Proxy proxy
   cdef void *ptr
   cdef unsigned int code
-  cdef Proxy proxy
 
   @staticmethod
-  cdef ProxyDescrBuiltin _make (size_t offset, Proxy proxy,
-                              unsigned int code):
+  cdef ProxyDescrBuiltin _make (Proxy proxy, void *ptr, unsigned int code):
     cdef ProxyDescrBuiltin ret
-    cdef size_t size
 
     ret = ProxyDescrBuiltin.__new__ (ProxyDescrBuiltin)
-    size = _BASIC_SIZES[code]
-    offset = offset + _get_padding (offset, size)
     ret.proxy = proxy
-    ret.proxy._assert_len (offset + size)
-    ret.ptr = proxy.base + offset
+    ret.ptr = ptr
     ret.code = code
     return ret
 
@@ -2563,35 +2455,23 @@ cdef class ProxyDescrBuiltin:
     return _builtin_acas (self.ptr, 0, exp, nval, self.code)
 
 cdef class ProxyDescrAny:
-  cdef unsigned long long data
   cdef Proxy proxy
+  cdef size_t offset
 
   @staticmethod
-  cdef ProxyDescrAny _make (unsigned long long data, Proxy proxy):
+  cdef ProxyDescrAny _make (Proxy proxy, void *ptr):
     cdef ProxyDescrAny ret
 
     ret = ProxyDescrAny.__new__ (ProxyDescrAny)
-    ret.data = data
     ret.proxy = proxy
+    ret.offset = <size_t>(<char *>ptr - proxy.base)
     return ret
 
   def __get__ (self, obj, cls):
     if obj is None:
       return self
 
-    return self.proxy._unpack_with_code (self.data >> _OFF_SHIFT,
-                                         self.data & _CODE_MASK)
-
-cdef object _make_descr (Proxy proxy, size_t base,
-                         unsigned long long data):
-  cdef unsigned int code
-
-  code = data & _CODE_MASK
-  if _is_inline_code (code):
-    return ProxyDescrBuiltin._make (base + (data >> _OFF_SHIFT), proxy, code)
-  else:
-    data = ((base + (data >> _OFF_SHIFT)) << _OFF_SHIFT) | code
-    return ProxyDescrAny._make (data, proxy)
+    return self.proxy._unpack (self.offset)
 
 cdef inline str _decode_str (Proxy proxy, size_t off, size_t size):
   proxy._assert_len (off + size)
@@ -2610,19 +2490,14 @@ cdef str _read_secret (Proxy proxy, size_t *offp):
     md = _decode_str (proxy, off + sizeof (md_len), md_len)
     off += md_len + sizeof (md_len)
 
-  size = proxy[off]
-  if size == 0xff:
-    proxy._assert_len (off + 1 + sizeof (size_t))
-    memcpy (&size, proxy.base + off + 1, sizeof (size))
-    off += sizeof (size)
-
-  val = _decode_str (proxy, off + 1, size)
+  off = _read_uleb128 (proxy, off, &size)
+  val = _decode_str (proxy, off, size)
   if (proxy.import_key is not None and
       md != HMAC(proxy.import_key, _encode_str (val),
                  _HASH_METHOD).hexdigest ()):
     raise ValueError ("import signature mismatch")
 
-  offp[0] = off + size + 1
+  offp[0] = off + size
   return val
 
 cdef object _fetch_type (str module, str name):
@@ -2650,41 +2525,23 @@ cdef object _read_type (Proxy proxy, size_t *offp):
   return _fetch_type (path[:ix], path[ix + 1:])
 
 cdef object _proxy_obj (Proxy proxy, size_t off):
-  cdef unsigned int wide, i_size, klen
-  cdef size_t base, i, saved, size
+  cdef Py_ssize_t ix
+  cdef unsigned int code
   cdef void *ptr
-  cdef unsigned int *ioffs
-  cdef unsigned long long *qoffs
-  cdef str name
 
   typ = _read_type (proxy, &off)
-  off += _get_padding (off, sizeof (long long))
+  attrs: ProxyDict = proxy._unpack (off)
+  values: ProxyList = attrs.tvalues
+  descrs: dict = {}
 
-  proxy._assert_len (off + 2 * sizeof (int))
-  i_size = (<unsigned int *> (proxy.base + off))[0]
-  klen = (<unsigned int *> (proxy.base + off))[1]
-  wide = i_size & 1
-  i_size >>= 1
-  base = off + sizeof (int) * 2
-  ptr = proxy.base + base
-  base += i_size * (sizeof (unsigned int) << wide)
-  proxy._assert_len (base)
+  for ix in range (len (values)):
+    ptr = values._c_ptr (ix, &code)
+    if not _is_inline_code (code):
+      val = ProxyDescrAny._make (proxy, ptr)
+    else:
+      val = ProxyDescrBuiltin._make (proxy, ptr, code)
 
-  descrs = {}
-  saved = base + klen + _get_padding (base + klen, sizeof (long long))
-
-  if wide:
-    qoffs = <unsigned long long *>ptr
-    for i in range (0, i_size, 2):
-      name = _decode_str (proxy, base, qoffs[i])
-      descrs[name] = _make_descr (proxy, saved, qoffs[i + 1])
-      base += qoffs[i]
-  else:
-    ioffs = <unsigned int *>ptr
-    for i in range (0, i_size, 2):
-      name = _decode_str (proxy, base, ioffs[i])
-      descrs[name] = _make_descr (proxy, saved, ioffs[i + 1])
-      base += ioffs[i]
+    descrs[str (attrs.tkeys._c_index (ix))] = val
 
   typ = type ("ProxyObject", (typ,), descrs)
   return typ.__new__ (typ)
@@ -2737,10 +2594,6 @@ cdef object _dispatch_type_impl (dict packers, typ, unsigned int ix):
       pass
 
   return fn
-
-cdef object _dispatch_type (typ, unsigned int ix):
-  with _custom_packers_lock as _:
-    return _dispatch_type_impl (_custom_packers, typ, ix)
 
 def pack (obj, **kwargs):
   """
@@ -2820,24 +2673,6 @@ def unpack_from (place, offset = 0, **kwargs):
   """
   return Proxy(place, offset, **kwargs).unpack ()
 
-def unpack_as (place, code, offset = 0, **kwargs):
-  """
-  Unpack an object from an input source using a specific type and offset.
-
-  :param place: The source object from which to unpack. Can be any object
-    with which a ``Proxy`` can be built.
-
-  :param int code: The typecode of the object to unpack. Must be one of
-    the TYPE_* constants defined in this module.
-
-  :param int offset *(default 0)*: The offset inside the source at which
-    to unpack.
-
-  See ``Proxy.__init__`` for information about the supported
-    keyword args.
-  """
-  return Proxy(place, 0, **kwargs).unpack_as (code, offset)
-
 def unproxy (obj):
   """
   Convert any proxied object into its materialized counterpart, recursively.
@@ -2859,11 +2694,30 @@ def _pack_module (packer, obj):
 def _unpack_module (cls, proxy, off):
   return Import_Module (proxy.read_secret (off))
 
+def _pack_function (packer, obj):
+  packer.write_secret (obj.__module__ + '.' + obj.__name__)
 
-_register_impl (_Type_Module, direction.PACK, _pack_module)
-_register_impl (_Type_Module, direction.UNPACK, _unpack_module)
+def _unpack_function (cls, proxy, off):
+  rs = proxy.read_secret (off)
+  ix = rs.index ('.')
+  module, name = rs[:ix], rs[ix + 1:]
+  ret = getattr (Import_Module (module), name)
 
-# Exported typecodes for the 'unpack_as' functions.
+  if not isinstance (ret, cls):
+    raise TypeError ('attribute %s of module %s is not a function' %
+                     (module, name))
+  return ret
+
+_register_impl (ModuleType, direction.PACK, _pack_module)
+_register_impl (ModuleType, direction.UNPACK, _unpack_module)
+
+_register_impl (FunctionType, direction.PACK, _pack_function)
+_register_impl (FunctionType, direction.UNPACK, _unpack_function)
+
+_register_impl (BuiltinFunctionType, direction.PACK, _pack_function)
+_register_impl (BuiltinFunctionType, direction.UNPACK, _unpack_function)
+
+# Exported typecodes.
 TYPE_INT8 = tpcode.INT8
 TYPE_INT16 = tpcode.INT16
 TYPE_INT32 = tpcode.INT8
