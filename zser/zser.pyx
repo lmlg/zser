@@ -85,9 +85,7 @@ ctypedef fused cfloat:
   float
   double
 
-ctypedef fused hidx_type:
-  unsigned int
-  unsigned long long
+hidx_type = cy.fused_type ("const unsigned int *", "const unsigned long long *")
 
 # Union used for type punning functions used for iterating proxy dicts.
 cdef union fn_caster:
@@ -1721,7 +1719,7 @@ cdef int _cnum_find_sorted (const unsigned char *ptr, size_t n, obj,
 
 @cy.cdivision (True)
 @cy.nogil
-cdef size_t _find_hidx (const hidx_type *hidxs, size_t hval, size_t n):
+cdef size_t _find_hidx (hidx_type hidxs, size_t hval, size_t n):
   cdef size_t i, step, tmp
 
   i = 0
@@ -1772,7 +1770,7 @@ cdef size_t _find_hidx (const hidx_type *hidxs, size_t hval, size_t n):
           return 0
   return 0
 
-cdef size_t _find_obj_by_hidx (const hidx_type *hidxs, size_t ix, size_t n,
+cdef size_t _find_obj_by_hidx (hidx_type hidxs, size_t ix, size_t n,
                                obj, ProxyList keys):
   cdef size_t hval
 
