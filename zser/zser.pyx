@@ -55,11 +55,6 @@ cdef object _custom_packers_lock = Lock ()
 cdef object HMAC = hmac.HMAC
 cdef object _HASH_METHOD = hashlib.sha256
 
-# Useful constants.
-DEF _OFF_SHIFT = 5
-DEF _CODE_MASK = 0x1f
-DEF _WIDE_LIMIT = 0x4000000
-
 # These must be kept in sync with the typecodes.
 cdef tuple _BASIC_FMTS = ("b", "h", "i", "l", "f", "d")
 cdef size_t[6] _BASIC_SIZES = [sizeof (char), sizeof (short),
@@ -86,11 +81,6 @@ ctypedef fused cfloat:
   double
 
 hidx_type = cy.fused_type ("const unsigned int *", "const unsigned long long *")
-
-# Union used for type punning functions used for iterating proxy dicts.
-cdef union fn_caster:
-  size_t wfn
-  dict_iter_fn bfn
 
 # Special object used for detecting misses in dict lookups.
 cdef object _SENTINEL = object ()
@@ -1343,9 +1333,8 @@ cdef class ProxyList:
 
   @cy.final
   cdef _unproxy (self):
-    unproxy_ = unproxy
     typ = list if self.mutable else tuple
-    return typ (unproxy_ (x) for x in self)
+    return typ (unproxy (x) for x in self)
 
 ###################################
 
@@ -2276,9 +2265,8 @@ cdef class ProxySet:
   @cy.final
   cdef _toset (self):
     rv = set ()
-    unproxy_ = unproxy
     for elem in self:
-      rv.add (unproxy_ (elem))
+      rv.add (unproxy (elem))
     return rv
 
 ########################################
@@ -2368,11 +2356,10 @@ cdef class ProxyDict:
 
   @cy.final
   cdef _todict (self):
-    unproxy_ = unproxy
     ret: dict = {}
 
     for key, val in self.items ():
-      ret[unproxy_ (key)] = unproxy_ (val)
+      ret[unproxy (key)] = unproxy (val)
 
   def __iter__ (self):
     return self.keys ()
@@ -2528,7 +2515,7 @@ cdef object _proxy_obj (Proxy proxy, size_t off):
   cdef unsigned int code
   cdef void *ptr
 
-  typ = _read_type (proxy, &off)
+  typ: type = _read_type (proxy, &off)
   attrs: ProxyDict = proxy._unpack (off)
   values: ProxyList = attrs.tvalues
   descrs: dict = {}
@@ -2600,10 +2587,13 @@ def pack (obj, **kwargs):
   The keyword arguments are the same as those used in ``Packer.__init__``.
   """
   cdef Packer p
+  cdef bytearray ret
 
   p = Packer (**kwargs)
   p.pack (obj)
-  return p.as_bytearray ()
+  ret = p.wbytes
+  PyByteArray_Resize (ret, p.wlen)
+  return ret
 
 def pack_into (obj, place, offset = None, **kwargs):
   """
@@ -2612,7 +2602,7 @@ def pack_into (obj, place, offset = None, **kwargs):
   :param obj: The object to be serialized.
 
   :param place: The object in which to serialize it. This object may be
-    a bytearray, or any object that implements the methods ``write``, and
+    a bytearray, or any object that implements the methods ``write`` and
     ``seek`` (in case the specified offset is not None).
 
   :param offset *(default None)*: The offset at which to serialize the object.
@@ -2628,22 +2618,22 @@ def pack_into (obj, place, offset = None, **kwargs):
   if fn is not _SENTINEL:
     if offset is None:
       return fn (b)
-    else:
-      seek = getattr (place, "seek", _SENTINEL)
-      if seek is _SENTINEL:
-        raise ValueError (
-          "don't know how to pack into object of type %r at a specific offset" %
-          type(place).__name__
-        )
 
-      prev = seek (0, 1)
-      seek (offset, 0)
+    seek = getattr (place, "seek", _SENTINEL)
+    if seek is _SENTINEL:
+      raise ValueError (
+        "don't know how to pack into object of type %r at a specific offset" %
+        type(place).__name__
+      )
 
-      mv = memoryview (b)
-      ioff = offset & (sizeof (long long) - 1)
-      ret = fn (mv[ioff:])
-      seek (prev, 0)
-      return ret
+    prev = seek (0, 1)
+    seek (offset, 0)
+
+    mv = memoryview (b)
+    ioff = offset & (sizeof (long long) - 1)
+    ret = fn (mv[ioff:])
+    seek (prev, 0)
+    return ret
   elif isinstance (place, bytearray):
     bp = <bytearray>place
     if offset is None:
@@ -2672,7 +2662,7 @@ def unpack_from (place, offset = 0, **kwargs):
   """
   return Proxy(place, offset, **kwargs).unpack ()
 
-def unproxy (obj):
+cpdef unproxy (obj):
   """
   Convert any proxied object into its materialized counterpart, recursively.
   i.e: a ProxyList is turned into a regular Python list.
