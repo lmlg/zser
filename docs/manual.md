@@ -218,8 +218,7 @@ class ProxyList
   Instances of this class behave like a Python list, with the following exceptions:
 
   * A ProxyList is only mutable (i.e: Its elements can be set) iff the underlying mapping
-    is read-write, and if its elements are all primitives (integers or floats) of the same
-    type.
+    is read-write, and if the element to be modified is primitive (integer or float).
   * The size of a ProxyList cannot be modified, even if it's mutable. This means that the
     following interfaces are not available: _append_, _clear_, _extend_, _insert_, _pop_,
     _remove_, _reverse_. The method _sort_ is also not available.
@@ -259,10 +258,31 @@ class ProxySet
 class ProxyDict
 ```
 
-  Indirect form of a builtin **dict**. Instances of this class are always immutable, which
-  means that the following interfaces are not available: _clear_, _pop_, _popitem_,
-  _setdefault_, _update_. In addition, since a ProxyDict is built from a Proxy,
-  the class method _fromkeys_ is not implemented.
+  Indirect form of a builtin **dict**. Instances of this class are normally immutable,
+  with the following exceptions:
+
+  * The ProxyDict was constructed out of a mutable **Proxy**.
+  * The value being mutated is a primitive type (integer or float).
+
+  If both conditions are met, then a **ProxyDict** can safely call the __setitem__
+  method to modify its values. In addition, the following 2 methods not present in
+  regular dicts are present in a **ProxyDict**:
+
+  ```python
+  atomic_cas (key, expected, new)
+  ```
+
+  ```python
+  atomic_add (key, value)
+  ```
+
+  These work similarly to the **ProxyList** methods of the same name, with the exception
+  that instead of an index, they take a key to reference the value to be modified.
+
+  Every other method present in a **dict** that may cause modifications to its underlying
+  structure is not supported by a **ProxyDict**. That means that the following interfaces
+  are not available: _clear_, _pop_, _popitem_, _update_. In addition, since a **ProxyDict**
+  is constructed out of a **Proxy**, the class method _fromkeys_ is not implemented.
 
 ## Custom objects
 

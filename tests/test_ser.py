@@ -122,6 +122,18 @@ def tst_plist_type (obj, rw, typ):
   q = zser.unpack_from (zser.pack (obj), rw = rw)
   assert type (zser.unproxy (q)) is typ
 
+def tst_plist_set_any ():
+  sv = 'abcdef'
+  q = zser.unpack_from (zser.pack ([1000, sv, 3.14]), rw = True)
+  new_int = -1
+  new_flt = 12.5
+
+  q[0] = new_int
+  q[-1] = new_flt
+  assert q[0] == new_int
+  assert q[1] == sv
+  assert q[2] == new_flt
+
 def test_plist_api ():
   p = zser.Packer ()
   lst = []
@@ -189,6 +201,9 @@ def test_plist_api ():
   assert [-1, 0] + list(q) == [-1, 0, 1, 2]
   q = zser.unpack_from (zser.pack ((1, 2)), rw = True)
   assert (-1, 0) + tuple(q) == (-1, 0, 1, 2)
+
+  # Test writes for heterogeneous lists.
+  tst_plist_set_any ()
 
 # Proxy string API
 
@@ -311,6 +326,19 @@ def test_pset_api ():
 
 # Proxy dict API
 
+def tst_pdict_modify ():
+  q = zser.unpack_from (zser.pack ({'a': 1000, 0: '???', None: -2.5}),
+                        rw = True)
+  q['a'] = 0
+  assert q.atomic_cas ('a', 0, 100)
+  assert q['a'] == 100
+
+  assert q.atomic_add (None, 2.5) == -2.5
+  assert q[None] == 0
+
+  with pytest.raises (TypeError):
+    q.atomic_cas (0, '???', None)
+
 def test_pdict_api ():
   lst = []
   for i in range (1000):
@@ -338,6 +366,9 @@ def test_pdict_api ():
   items.sort (key = pair_key)
   lst.sort (key = pair_key)
   assert items == lst
+
+  # Test ProxyDict mutations
+  tst_pdict_modify ()
 
 # Custom object API
 

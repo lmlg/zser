@@ -83,5 +83,3 @@ ctypedef enum tpcode:
 ctypedef enum direction:
   PACK
   UNPACK
-
-ctypedef object (*dict_iter_fn) (const void *, size_t, object)
