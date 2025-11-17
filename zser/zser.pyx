@@ -109,7 +109,7 @@ cdef _pack_cnum (Packer xm, int code, cnum value):
   extra = _get_padding (offset + 1, sizeof (value))
   rv = extra + sizeof (value) + 1
   xm.resize (rv)
-  ptr = xm.wbytes
+  ptr = xm.ptr
   extra += offset + 1
 
   ptr[offset] = code
@@ -204,13 +204,13 @@ cdef class f64:
   def pack (self, Packer xm):
     _pack_cnum[double] (xm, tpcode.FLOAT64, self.value)
 
-cdef size_t _write_uleb128 (buf, size_t off, size_t val):
+cdef size_t _write_uleb128 (void *buf, size_t off, size_t val):
   cdef unsigned char byte
   cdef unsigned char *outp
   cdef unsigned char *start
   cdef size_t ret
 
-  start = buf
+  start = <unsigned char *>buf
   outp = start = start + off
 
   while True:
@@ -234,12 +234,12 @@ def _pack_str (Packer xm, str value):
   kind = STR_KIND (value)
   xm.resize ((size << (kind >> 1)) + 5 + sizeof (size_t))
 
-  ptr = xm.wbytes
+  ptr = xm.ptr
   offset = prev = xm.offset
 
   ptr[offset] = tpcode.STR
   ptr[offset + 1] = kind
-  offset += _write_uleb128 (xm.wbytes, offset + 2, size) + 2
+  offset += _write_uleb128 (xm.ptr, offset + 2, size) + 2
 
   if (kind & 1) == 0:
     # UCS-2 or UCS-4 string.
@@ -262,10 +262,10 @@ cdef _pack_bytes (Packer xm, value):
 
   xm.resize (10 + 1 + size)
   offset = prev = xm.offset
-  ptr = xm.wbytes
+  ptr = xm.ptr
 
   ptr[offset] = tpcode.BYTES if type (value) is bytes else tpcode.BYTEARRAY
-  offset += _write_uleb128 (xm.wbytes, offset + 1, size) + 1
+  offset += _write_uleb128 (xm.ptr, offset + 1, size) + 1
 
   memcpy (ptr + offset, src, size)
   xm.bump (offset - prev + size)
@@ -332,7 +332,7 @@ cdef _pack_flat_iter (Packer xm, value, Py_ssize_t at):
 
   tpoff = xm.offset
   xm.putb (0)
-  ulen = _write_uleb128 (xm.wbytes, xm.offset, len (value))
+  ulen = _write_uleb128 (xm.ptr, xm.offset, len (value))
   xm.bump (ulen + sizeof (size_t))
 
   offsets: list = []
@@ -367,7 +367,7 @@ cdef _pack_array (Packer xm, value):
   if xtype >= 0:
     # Inline integers or floats.
     xm.putb (xtype)
-    xm.bump (_write_uleb128 (xm.wbytes, xm.offset, size))
+    xm.bump (_write_uleb128 (xm.ptr, xm.offset, size))
     xm.align_to (_BASIC_SIZES[xtype])
     xm.resize (size * _BASIC_SIZES[xtype])
     xm.pack_struct (str (size) + _BASIC_FMTS[xtype], *value)
@@ -379,7 +379,7 @@ cdef _write_hashes (Packer xm, list hashes, bint wide):
   cdef char *ptr
   cdef Py_ssize_t ix
 
-  ptr = xm.wbytes
+  ptr = xm.ptr
   ptr += xm.offset
 
   if wide:
@@ -419,7 +419,7 @@ cdef _pack_set (Packer xm, value):
 
   hashes = sorted (hashes, key = lambda elem: elem[0])
   xm.resize (10 + sizeof (size_t))   # uleb128 (10) + offset
-  xm.bump (_write_uleb128 (xm.wbytes, xm.offset, len (hashes)))
+  xm.bump (_write_uleb128 (xm.ptr, xm.offset, len (hashes)))
 
   xm.align_to (size)
   xm.resize (size + size * len (hashes))
@@ -438,7 +438,7 @@ cdef _pack_dict (Packer xm, value):
 
   xm.resize (24)
   xm.putb (tpcode.DICT)
-  xm.bump (_write_uleb128 (xm.wbytes, xm.offset, len (value)))
+  xm.bump (_write_uleb128 (xm.ptr, xm.offset, len (value)))
 
   wide = False
   for key, val in value.items ():
@@ -490,7 +490,7 @@ cdef _write_secret (Packer xm, str x):
     xm.pack_struct ("I%ds" % len (md), len (md), md)
 
   xm.resize (sz + 10 + 1)
-  xm.bump (_write_uleb128 (xm.wbytes, xm.offset, sz))
+  xm.bump (_write_uleb128 (xm.ptr, xm.offset, sz))
   xm.bwrite (val)
 
 cdef inline _write_type (Packer xm, typ):
@@ -515,16 +515,14 @@ cdef dict _obj_vars (obj):
 
 cdef _pack_generic (Packer xm, value):
   cdef size_t off, extra
-  cdef dict slot_types, obj_map
-  cdef object tmp
 
   xm.putb (tpcode.OTHER)
   _write_type (xm, type (value))
 
   tmp = getattr (value, "__slot_types__", _SENTINEL)
   if tmp is not _SENTINEL:
-    slot_types = tmp
-    obj_map = {}
+    slot_types: dict = tmp
+    obj_map: dict = {}
     for key, typ in slot_types.items ():
       val = getattr (value, key)
       if not isinstance (val, typ):
@@ -593,6 +591,7 @@ cdef class Packer:
   cdef size_t hash_seed
   cdef dict custom_packers
   cdef object import_key
+  cdef char* ptr
 
   def __init__ (self, offset = 0, id_cache = None, hash_seed = 0,
                 custom_packers = None, initial_size = 8, import_key = None):
@@ -625,6 +624,7 @@ cdef class Packer:
       self.custom_packers = _custom_packers.copy ()
     self.wlen = self.offset
     self.import_key =  _get_import_key (import_key)
+    self.ptr = self.wbytes
 
   cpdef resize (self, size_t extra):
     """
@@ -632,9 +632,12 @@ cdef class Packer:
     additional ``extra`` bytes.
     """
     nsize = self.wlen + extra
-    if (nsize >= <size_t> (len (self.wbytes)) and
-        PyByteArray_Resize (self.wbytes, _upsize (nsize)) < 0):
+    if nsize < <size_t> (len (self.wbytes)):
+      return
+    elif PyByteArray_Resize (self.wbytes, _upsize (nsize)) < 0:
       raise MemoryError
+
+    self.ptr = self.wbytes
 
   cpdef bump (self, size_t off):
     "Bump the internal offset of the stream by ``off`` bytes."
@@ -645,7 +648,7 @@ cdef class Packer:
     "Write a single byte to the stream."
 
     self.resize (1)
-    self.wbytes[self.wlen] = bx
+    self.ptr[self.wlen] = bx
     self.bump (1)
 
   cpdef zpad (self, size_t size):
