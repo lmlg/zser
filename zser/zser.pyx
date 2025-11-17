@@ -26,7 +26,7 @@ import operator
 import struct
 from sys import byteorder, maxsize
 from threading import Lock
-from types import BuiltinFunctionType, FunctionType, ModuleType
+import types
 
 cdef object S_pack_into = struct.pack_into
 cdef object S_unpack_from = struct.unpack_from
@@ -89,9 +89,10 @@ cdef object _SENTINEL = object ()
 
 # Map used to fixup type names that aren't exported in the 'builtins' module.
 cdef dict _BUILTINS_MAP = {
-  'module': ModuleType,
-  'function': FunctionType,
-  'builtin_function_or_method': BuiltinFunctionType
+  'ellipsis': types.EllipsisType,
+  'module': types.ModuleType,
+  'function': types.FunctionType,
+  'builtin_function_or_method': types.BuiltinFunctionType
 }
 
 cdef inline bint _is_inline_code (unsigned int code):
@@ -133,6 +134,42 @@ def _pack_int (Packer xm, value):
     blen = len (brepr)
     xm.pack_struct ("=I" + str (blen) + "s", blen, brepr)
 
+cdef class i8:
+  cdef cy.schar value
+
+  def __init__ (self, val):
+    self.value = val
+
+  def pack (self, Packer xm):
+    _pack_cnum[cy.schar] (xm, tpcode.INT8, self.value)
+
+cdef class i16:
+  cdef short value
+
+  def __init__ (self, val):
+    self.value = val
+
+  def pack (self, Packer xm):
+    _pack_cnum[short] (xm, tpcode.INT16, self.value)
+
+cdef class i32:
+  cdef int value
+
+  def __init__ (self, val):
+    self.value = val
+
+  def pack (self, Packer xm):
+    _pack_cnum[int] (xm, tpcode.INT32, self.value)
+
+cdef class i64:
+  cdef cy.longlong value
+
+  def __init__ (self, val):
+    self.value = val
+
+  def pack (self, Packer xm):
+    _pack_cnum[cy.longlong] (xm, tpcode.INT64, self.value)
+
 cdef int _float_code (obj):
   cdef double dbl
 
@@ -148,6 +185,24 @@ def _pack_float (Packer xm, value):
     _pack_cnum[float] (xm, tpcode.FLOAT32, value)
   else:
     _pack_cnum[double] (xm, tpcode.FLOAT64, value)
+
+cdef class f32:
+  cdef float value
+
+  def __init__ (self, val):
+    self.value = val
+
+  def pack (self, Packer xm):
+    _pack_cnum[float] (xm, tpcode.FLOAT32, self.value)
+
+cdef class f64:
+  cdef double value
+
+  def __init__ (self, val):
+    self.value = val
+
+  def pack (self, Packer xm):
+    _pack_cnum[double] (xm, tpcode.FLOAT64, self.value)
 
 cdef size_t _write_uleb128 (buf, size_t off, size_t val):
   cdef unsigned char byte
@@ -460,10 +515,24 @@ cdef dict _obj_vars (obj):
 
 cdef _pack_generic (Packer xm, value):
   cdef size_t off, extra
+  cdef dict slot_types, obj_map
+  cdef object tmp
 
   xm.putb (tpcode.OTHER)
   _write_type (xm, type (value))
-  xm.pack (_obj_vars (value))
+
+  tmp = getattr (value, "__slot_types__", _SENTINEL)
+  if tmp is not _SENTINEL:
+    slot_types = tmp
+    obj_map = {}
+    for key, typ in slot_types.items ():
+      val = getattr (value, key)
+      if not isinstance (val, typ):
+        val = typ (val)
+      obj_map[key] = val
+    xm.pack (obj_map)
+  else:
+    xm.pack (_obj_vars (value))
 
 cdef inline size_t _upsize (size_t value):
   # Round up 'value' to the next power of 2.
@@ -476,6 +545,9 @@ cdef inline size_t _upsize (size_t value):
 
   return value + 1
 
+def _pack_fixed (Packer xm, value):
+  value.pack (xm)
+
 cdef dict _BASIC_PACKERS = {
   int: _pack_int,
   float: _pack_float,
@@ -486,7 +558,14 @@ cdef dict _BASIC_PACKERS = {
   tuple: _pack_array,
   set: _pack_set,
   frozenset: _pack_set,
-  dict: _pack_dict
+  dict: _pack_dict,
+  # Fixed-size integers and floats.
+  i8:  _pack_fixed,
+  i16: _pack_fixed,
+  i32: _pack_fixed,
+  i64: _pack_fixed,
+  f32: _pack_fixed,
+  f64: _pack_fixed,
 }
 
 cdef object _get_import_key (object key):
@@ -2722,14 +2801,14 @@ def _unpack_function (cls, proxy, off):
                      (module, name))
   return ret
 
-_register_impl (ModuleType, direction.PACK, _pack_module)
-_register_impl (ModuleType, direction.UNPACK, _unpack_module)
+_register_impl (types.ModuleType, direction.PACK, _pack_module)
+_register_impl (types.ModuleType, direction.UNPACK, _unpack_module)
 
-_register_impl (FunctionType, direction.PACK, _pack_function)
-_register_impl (FunctionType, direction.UNPACK, _unpack_function)
+_register_impl (types.FunctionType, direction.PACK, _pack_function)
+_register_impl (types.FunctionType, direction.UNPACK, _unpack_function)
 
-_register_impl (BuiltinFunctionType, direction.PACK, _pack_function)
-_register_impl (BuiltinFunctionType, direction.UNPACK, _unpack_function)
+_register_impl (types.BuiltinFunctionType, direction.PACK, _pack_function)
+_register_impl (types.BuiltinFunctionType, direction.UNPACK, _unpack_function)
 
 # Exported typecodes.
 TYPE_INT8 = tpcode.INT8

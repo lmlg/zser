@@ -6,11 +6,11 @@ big (even larger than the available memory), since many of the objects that can
 be returned are mapped directly on top of the input source. Thus, *zser* can
 be thought of as 'zero-copy serialization', hence its name.
 
-With the exception of some complex-to-serialize types like modules and functions,
-*zser* supports every python builtin, and also any user-defined class, although
-extension types (those defined in C) are not supported out of the bat. Still, the
-library allows users to extend the functionality to support any type. Consult the
-documentation for further details.
+With the exception of some complex-to-serialize types, *zser* supports every
+python builtin, and also any user-defined class, although extension types (those
+defined in C) are not supported out of the bat. Still, the library allows users
+to extend the functionality to support any type. Consult the documentation for
+further details.
 
 ### Basic example
 
