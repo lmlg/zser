@@ -1,11 +1,3 @@
-- Maintain a pointer in the Packer class so that we don't have to repeatedly
-  call out to buffer methods. It can be set on construction and only needs
-  to be updated when the internal bytearray is resized.
-
-- The custom packers need to be merged with the global ones rather than
-  simply using the ones the user passed. This is so that any global
-  packers are taken into consideration.
-
 - Use an LRU cache for cyclic object handling instead of a potentially
   unbounded dict. This cache must have the ability to mark objects as
   non-evictable when they are being packed.

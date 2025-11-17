@@ -618,10 +618,10 @@ cdef class Packer:
     self.wbytes = bytearray (_upsize (initial_size + offset))
     self.id_cache = id_cache if id_cache is not None else {}
     self.hash_seed = hash_seed
+    self.custom_packers = _custom_packers.copy ()
     if custom_packers is not None:
-      self.custom_packers = custom_packers
-    else:
-      self.custom_packers = _custom_packers.copy ()
+      self.custom_packers.update (custom_packers)
+
     self.wlen = self.offset
     self.import_key =  _get_import_key (import_key)
     self.ptr = self.wbytes
