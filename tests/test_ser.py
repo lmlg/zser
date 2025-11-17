@@ -384,7 +384,7 @@ class CustomWithDict:
 
 class CustomWithSlots:
   __slots__ = "a", "b1", "cxx", "d_"
-  
+
   def __init__ (self, a, b, c, d):
     self.a = a
     self.b1 = b
@@ -402,6 +402,22 @@ def test_custom ():
   c2 = CustomWithSlots (66, -999.4, ["??????"], None)
   q = zser.unpack_from (zser.pack (c2))
   assert q.fx (1) == c2.fx (1)
+
+class TypedCustom:
+  __slot_types__ = {'x': zser.i32, 'y': zser.f64, 'z': str}
+
+  def __init__ (self, x, y, z):
+    self.x = x
+    self.y = y
+    self.z = z
+
+  def fn (self, elem):
+    return (self.x, elem, self.y, self.z)
+
+def test_slot_types ():
+  c = TypedCustom (1 << 20, 3.1415, 'hello')
+  q = zser.unpack_from (zser.pack (c))
+  assert q.fn (None) == c.fn (None)
 
 def test_backref ():
   c1 = CustomWithDict (-1, 1, .5)

@@ -26,7 +26,7 @@ import operator
 import struct
 from sys import byteorder, maxsize
 from threading import Lock
-from types import BuiltinFunctionType, FunctionType, ModuleType
+import types
 
 cdef object S_pack_into = struct.pack_into
 cdef object S_unpack_from = struct.unpack_from
@@ -89,9 +89,10 @@ cdef object _SENTINEL = object ()
 
 # Map used to fixup type names that aren't exported in the 'builtins' module.
 cdef dict _BUILTINS_MAP = {
-  'module': ModuleType,
-  'function': FunctionType,
-  'builtin_function_or_method': BuiltinFunctionType
+  'ellipsis': types.EllipsisType,
+  'module': types.ModuleType,
+  'function': types.FunctionType,
+  'builtin_function_or_method': types.BuiltinFunctionType
 }
 
 cdef inline bint _is_inline_code (unsigned int code):
@@ -108,7 +109,7 @@ cdef _pack_cnum (Packer xm, int code, cnum value):
   extra = _get_padding (offset + 1, sizeof (value))
   rv = extra + sizeof (value) + 1
   xm.resize (rv)
-  ptr = xm.wbytes
+  ptr = xm.ptr
   extra += offset + 1
 
   ptr[offset] = code
@@ -133,6 +134,42 @@ def _pack_int (Packer xm, value):
     blen = len (brepr)
     xm.pack_struct ("=I" + str (blen) + "s", blen, brepr)
 
+cdef class i8:
+  cdef cy.schar value
+
+  def __init__ (self, val):
+    self.value = val
+
+  def pack (self, Packer xm):
+    _pack_cnum[cy.schar] (xm, tpcode.INT8, self.value)
+
+cdef class i16:
+  cdef short value
+
+  def __init__ (self, val):
+    self.value = val
+
+  def pack (self, Packer xm):
+    _pack_cnum[short] (xm, tpcode.INT16, self.value)
+
+cdef class i32:
+  cdef int value
+
+  def __init__ (self, val):
+    self.value = val
+
+  def pack (self, Packer xm):
+    _pack_cnum[int] (xm, tpcode.INT32, self.value)
+
+cdef class i64:
+  cdef cy.longlong value
+
+  def __init__ (self, val):
+    self.value = val
+
+  def pack (self, Packer xm):
+    _pack_cnum[cy.longlong] (xm, tpcode.INT64, self.value)
+
 cdef int _float_code (obj):
   cdef double dbl
 
@@ -149,13 +186,31 @@ def _pack_float (Packer xm, value):
   else:
     _pack_cnum[double] (xm, tpcode.FLOAT64, value)
 
-cdef size_t _write_uleb128 (buf, size_t off, size_t val):
+cdef class f32:
+  cdef float value
+
+  def __init__ (self, val):
+    self.value = val
+
+  def pack (self, Packer xm):
+    _pack_cnum[float] (xm, tpcode.FLOAT32, self.value)
+
+cdef class f64:
+  cdef double value
+
+  def __init__ (self, val):
+    self.value = val
+
+  def pack (self, Packer xm):
+    _pack_cnum[double] (xm, tpcode.FLOAT64, self.value)
+
+cdef size_t _write_uleb128 (void *buf, size_t off, size_t val):
   cdef unsigned char byte
   cdef unsigned char *outp
   cdef unsigned char *start
   cdef size_t ret
 
-  start = buf
+  start = <unsigned char *>buf
   outp = start = start + off
 
   while True:
@@ -179,12 +234,12 @@ def _pack_str (Packer xm, str value):
   kind = STR_KIND (value)
   xm.resize ((size << (kind >> 1)) + 5 + sizeof (size_t))
 
-  ptr = xm.wbytes
+  ptr = xm.ptr
   offset = prev = xm.offset
 
   ptr[offset] = tpcode.STR
   ptr[offset + 1] = kind
-  offset += _write_uleb128 (xm.wbytes, offset + 2, size) + 2
+  offset += _write_uleb128 (xm.ptr, offset + 2, size) + 2
 
   if (kind & 1) == 0:
     # UCS-2 or UCS-4 string.
@@ -207,10 +262,10 @@ cdef _pack_bytes (Packer xm, value):
 
   xm.resize (10 + 1 + size)
   offset = prev = xm.offset
-  ptr = xm.wbytes
+  ptr = xm.ptr
 
   ptr[offset] = tpcode.BYTES if type (value) is bytes else tpcode.BYTEARRAY
-  offset += _write_uleb128 (xm.wbytes, offset + 1, size) + 1
+  offset += _write_uleb128 (xm.ptr, offset + 1, size) + 1
 
   memcpy (ptr + offset, src, size)
   xm.bump (offset - prev + size)
@@ -277,7 +332,7 @@ cdef _pack_flat_iter (Packer xm, value, Py_ssize_t at):
 
   tpoff = xm.offset
   xm.putb (0)
-  ulen = _write_uleb128 (xm.wbytes, xm.offset, len (value))
+  ulen = _write_uleb128 (xm.ptr, xm.offset, len (value))
   xm.bump (ulen + sizeof (size_t))
 
   offsets: list = []
@@ -312,7 +367,7 @@ cdef _pack_array (Packer xm, value):
   if xtype >= 0:
     # Inline integers or floats.
     xm.putb (xtype)
-    xm.bump (_write_uleb128 (xm.wbytes, xm.offset, size))
+    xm.bump (_write_uleb128 (xm.ptr, xm.offset, size))
     xm.align_to (_BASIC_SIZES[xtype])
     xm.resize (size * _BASIC_SIZES[xtype])
     xm.pack_struct (str (size) + _BASIC_FMTS[xtype], *value)
@@ -324,7 +379,7 @@ cdef _write_hashes (Packer xm, list hashes, bint wide):
   cdef char *ptr
   cdef Py_ssize_t ix
 
-  ptr = xm.wbytes
+  ptr = xm.ptr
   ptr += xm.offset
 
   if wide:
@@ -364,7 +419,7 @@ cdef _pack_set (Packer xm, value):
 
   hashes = sorted (hashes, key = lambda elem: elem[0])
   xm.resize (10 + sizeof (size_t))   # uleb128 (10) + offset
-  xm.bump (_write_uleb128 (xm.wbytes, xm.offset, len (hashes)))
+  xm.bump (_write_uleb128 (xm.ptr, xm.offset, len (hashes)))
 
   xm.align_to (size)
   xm.resize (size + size * len (hashes))
@@ -383,7 +438,7 @@ cdef _pack_dict (Packer xm, value):
 
   xm.resize (24)
   xm.putb (tpcode.DICT)
-  xm.bump (_write_uleb128 (xm.wbytes, xm.offset, len (value)))
+  xm.bump (_write_uleb128 (xm.ptr, xm.offset, len (value)))
 
   wide = False
   for key, val in value.items ():
@@ -435,7 +490,7 @@ cdef _write_secret (Packer xm, str x):
     xm.pack_struct ("I%ds" % len (md), len (md), md)
 
   xm.resize (sz + 10 + 1)
-  xm.bump (_write_uleb128 (xm.wbytes, xm.offset, sz))
+  xm.bump (_write_uleb128 (xm.ptr, xm.offset, sz))
   xm.bwrite (val)
 
 cdef inline _write_type (Packer xm, typ):
@@ -463,7 +518,19 @@ cdef _pack_generic (Packer xm, value):
 
   xm.putb (tpcode.OTHER)
   _write_type (xm, type (value))
-  xm.pack (_obj_vars (value))
+
+  tmp = getattr (value, "__slot_types__", _SENTINEL)
+  if tmp is not _SENTINEL:
+    slot_types: dict = tmp
+    obj_map: dict = {}
+    for key, typ in slot_types.items ():
+      val = getattr (value, key)
+      if not isinstance (val, typ):
+        val = typ (val)
+      obj_map[key] = val
+    xm.pack (obj_map)
+  else:
+    xm.pack (_obj_vars (value))
 
 cdef inline size_t _upsize (size_t value):
   # Round up 'value' to the next power of 2.
@@ -476,6 +543,9 @@ cdef inline size_t _upsize (size_t value):
 
   return value + 1
 
+def _pack_fixed (Packer xm, value):
+  value.pack (xm)
+
 cdef dict _BASIC_PACKERS = {
   int: _pack_int,
   float: _pack_float,
@@ -486,7 +556,14 @@ cdef dict _BASIC_PACKERS = {
   tuple: _pack_array,
   set: _pack_set,
   frozenset: _pack_set,
-  dict: _pack_dict
+  dict: _pack_dict,
+  # Fixed-size integers and floats.
+  i8:  _pack_fixed,
+  i16: _pack_fixed,
+  i32: _pack_fixed,
+  i64: _pack_fixed,
+  f32: _pack_fixed,
+  f64: _pack_fixed,
 }
 
 cdef object _get_import_key (object key):
@@ -514,6 +591,7 @@ cdef class Packer:
   cdef size_t hash_seed
   cdef dict custom_packers
   cdef object import_key
+  cdef char* ptr
 
   def __init__ (self, offset = 0, id_cache = None, hash_seed = 0,
                 custom_packers = None, initial_size = 8, import_key = None):
@@ -540,12 +618,13 @@ cdef class Packer:
     self.wbytes = bytearray (_upsize (initial_size + offset))
     self.id_cache = id_cache if id_cache is not None else {}
     self.hash_seed = hash_seed
+    self.custom_packers = _custom_packers.copy ()
     if custom_packers is not None:
-      self.custom_packers = custom_packers
-    else:
-      self.custom_packers = _custom_packers.copy ()
+      self.custom_packers.update (custom_packers)
+
     self.wlen = self.offset
     self.import_key =  _get_import_key (import_key)
+    self.ptr = self.wbytes
 
   cpdef resize (self, size_t extra):
     """
@@ -553,9 +632,12 @@ cdef class Packer:
     additional ``extra`` bytes.
     """
     nsize = self.wlen + extra
-    if (nsize >= <size_t> (len (self.wbytes)) and
-        PyByteArray_Resize (self.wbytes, _upsize (nsize)) < 0):
+    if nsize < <size_t> (len (self.wbytes)):
+      return
+    elif PyByteArray_Resize (self.wbytes, _upsize (nsize)) < 0:
       raise MemoryError
+
+    self.ptr = self.wbytes
 
   cpdef bump (self, size_t off):
     "Bump the internal offset of the stream by ``off`` bytes."
@@ -566,7 +648,7 @@ cdef class Packer:
     "Write a single byte to the stream."
 
     self.resize (1)
-    self.wbytes[self.wlen] = bx
+    self.ptr[self.wlen] = bx
     self.bump (1)
 
   cpdef zpad (self, size_t size):
@@ -2722,14 +2804,14 @@ def _unpack_function (cls, proxy, off):
                      (module, name))
   return ret
 
-_register_impl (ModuleType, direction.PACK, _pack_module)
-_register_impl (ModuleType, direction.UNPACK, _unpack_module)
+_register_impl (types.ModuleType, direction.PACK, _pack_module)
+_register_impl (types.ModuleType, direction.UNPACK, _unpack_module)
 
-_register_impl (FunctionType, direction.PACK, _pack_function)
-_register_impl (FunctionType, direction.UNPACK, _unpack_function)
+_register_impl (types.FunctionType, direction.PACK, _pack_function)
+_register_impl (types.FunctionType, direction.UNPACK, _unpack_function)
 
-_register_impl (BuiltinFunctionType, direction.PACK, _pack_function)
-_register_impl (BuiltinFunctionType, direction.UNPACK, _unpack_function)
+_register_impl (types.BuiltinFunctionType, direction.PACK, _pack_function)
+_register_impl (types.BuiltinFunctionType, direction.UNPACK, _unpack_function)
 
 # Exported typecodes.
 TYPE_INT8 = tpcode.INT8
