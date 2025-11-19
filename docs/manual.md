@@ -25,8 +25,7 @@ as a way share data, and communicate changes as well.
 
 ## Supported types
 
-All of Python builtin types are supported, with the exception of functions and
-modules, which are a bit tricky to handle. Any user-defined type that is
+All of Python builtin types are supported. Any user-defined type that is
 implemented in Python is also fully supported, but extension types are not.
 
 It should be noted that **zser** allows users to customize the way unsupported
@@ -287,7 +286,7 @@ class ProxyDict
 ## Custom objects
 
 When a user-defined class is packed and then unpacked, **zser** dynamically creates a proxy
-class to masquerade it. Instances of this newly created class implements the same methods
+class to masquerade it. Instances of this newly created class implement the same methods
 and have the same properties of the original object, with the following caveats:
 
   * The object's slots are implemented as descriptors that access the data via a Proxy.
@@ -302,6 +301,48 @@ and have the same properties of the original object, with the following caveats:
     type(proxy).value.add (-1)     # Atomically adds -1 to proxy's value
     type(proxy).value.cas (0, 2)   # Atomic CAS on proxy's value
   ```
+
+Note that for a custom object to automatically serializable by **zser**, it needs to have
+one of the following methods:
+
+  * `__dict__`: Which returns a dict-like object which maps attributes to their values.
+  * `__slots__`: An iterable that contains the names of the attributes.
+  * `__slot_types__`: A dict-like object that map attributes to their types.
+
+One of __dict__ or __slots__ are typically always available, except for extension classes.
+The last one, __slot_types__ can be defined by users to specify the actual type of an
+attribute. For example:
+
+```python
+class Example:
+  __slot_types__ = {'value': zser.f32 }
+  def __init__ (self, value):
+    self.value = value
+
+ex = zser.unpack_from (zser.pack (Example (1)))
+print (ex.value)   # 1.0
+```
+
+In the above example, we force **zser** to serialize the attribute `value` to a float32.
+Even in the presence of a different type (i.e: `int`), the library is able to coerce it
+to the desired type.
+
+## Fixed-size types
+
+The library defines a few fixed-size types for some primitives so that users can specify
+the desired size and type of some attributes. As shown in the above example, it's possible
+to specify them via the `__slot_types__` class attribute. They can also be used in custom
+packing routines. When not specified, the library will use the smallest size that fits the
+current value of an attribute. The aforementioned types are thus:
+
+  * i8
+  * i16
+  * i32
+  * i64
+  * f32
+  * f64
+
+These correspond to integers and floats of 8, 16, 32, or 64 bits.
 
 ## Module functions
 
