@@ -462,19 +462,13 @@ class Registered:
 
 @zser.register_pack (Registered)
 def pack_obj (pk, obj):
-  off = pk.getoff ()
-  pk.bump (pk.struct_size ("N"))
-  size = pk.pack (obj.a1)
-  pk.pack_struct_at ("N", off, size)
+  pk.pack (obj.a1)
   pk.pack (obj.a2)
 
 @zser.register_unpack (Registered)
 def unpack_obj (cls, handler, off):
-  size = handler.unpack_struct ("N", off)[0]
-  off += handler.struct_size ("N")
-  a1 = handler.unpack_from (off)
-  off += size
-  a2 = handler.unpack_from (off)
+  a1 = handler.unpack ()
+  a2 = handler.unpack ()
   return cls (a1, a2)
 
 def test_register ():
@@ -586,3 +580,12 @@ def test_persistent_changes ():
     assert q[0] == -1
     os.remove (path)
 
+def test_sequential_offsets ():
+  p = zser.Packer ()
+  elems =  (1001, 3.14, "abc", b'hello', [-2, "!!!"], {'a': 1})
+  for elem in elems:
+    p.pack (elem)
+
+  px = zser.Proxy (p.as_bytearray ())
+  for elem in elems:
+    assert px.unpack () == elem

@@ -8,8 +8,3 @@
   This should be user-tunable.
 
 - Also allow None, True and False to be stored inline.
-
-- In the Proxy class, a call to `unpack` without arguments should bump
-  an internal offset member so that the next call will unpack the following
-  element. This requires each object to implement a way to know the total
-  size it takes up in the internal mapping, though.
