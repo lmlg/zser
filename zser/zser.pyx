@@ -326,9 +326,10 @@ cdef int _compute_basic_type (iterable):
 
   return rv
 
-cdef _pack_flat_iter (Packer xm, value, Py_ssize_t at):
+cdef _pack_flat_iter (Packer xm, object value, Py_ssize_t at):
   cdef size_t tpoff, ix, pos
   cdef bint wide
+  cdef unsigned int ulen
 
   tpoff = xm.offset
   xm.putb (0)
@@ -403,7 +404,7 @@ cdef _pack_set (Packer xm, value):
   hashes: list = []
   wide = False
 
-  for index, elem in enumerate (value):
+  for elem in value:
     hv = _xhash (elem, xm.hash_seed)
     if hv >= INT32_MAX:
       wide =  True
@@ -865,69 +866,93 @@ cdef class Proxy:
     "Return the byte at position ``ix``."
     return self.mbuf[ix]
 
-  cdef _unpack_with_code (self, size_t offset, unsigned int code):
+  cdef _unpack_with_code (self, size_t offset, unsigned int code,
+                          size_t *psize):
     cdef size_t size, rel_off
     cdef unsigned int ilen
 
+    rel_off = offset
+
     if code == tpcode.INT8:
+      psize[0] += 1 + 1
       return _cnum_unpack[cy.schar] (self, offset, 0)
     elif code == tpcode.INT16:
+      psize[0] += _get_padding (offset, 2) + 2 + 1
       return _cnum_unpack[short] (self, offset, 0)
     elif code == tpcode.INT32:
+      psize[0] += _get_padding (offset, 4) + 4 + 1
       return _cnum_unpack[int] (self, offset, 0)
     elif code == tpcode.INT64:
+      psize[0] += _get_padding (offset, 8) + 8 + 1
       return _cnum_unpack[cy.longlong] (self, offset, 0)
     elif code == tpcode.FLOAT32:
+      psize[0] += _get_padding (offset, sizeof (float)) + sizeof (float) + 1
       return _cnum_unpack[float] (self, offset, 0)
     elif code == tpcode.FLOAT64:
+      psize[0] += _get_padding (offset, sizeof (double)) + sizeof (double) + 1
       return _cnum_unpack[double] (self, offset, 0)
     elif code == tpcode.NUM:
       self._assert_len (offset + sizeof (ilen))
       memcpy (&ilen, self.base + offset, sizeof (ilen))
+      psize[0] += ilen + sizeof (ilen) + 1
       offset += sizeof (ilen)
       return Int_From_Bytes (self.mbuf[offset:offset + ilen],
                              SYS_endian, signed = True)
     elif code == tpcode.STR:
-      return ProxyStr._make (self, offset)
+      return ProxyStr._make (self, offset, psize)
     elif code in (tpcode.BYTES, tpcode.BYTEARRAY):
       offset = _read_uleb128 (self, offset, &size)
+      psize[0] += offset + size - rel_off + 1
       mbx = self.mbuf[offset:offset + size]
       return bytes(mbx) if code == tpcode.BYTES else bytearray(mbx)
     elif code == tpcode.NONE:
+      psize[0] += 1 + 1
       return None
     elif code == tpcode.TRUE:
+      psize[0] += 1 + 1
       return True
     elif code == tpcode.FALSE:
+      psize[0] += 1 + 1
       return False
     elif code == tpcode.LIST or code == tpcode.TUPLE:
-      return ProxyList._make (self, offset, code == tpcode.LIST)
+      return ProxyList._make (self, offset, code == tpcode.LIST, psize)
     elif code == tpcode.SET:
-      return ProxySet._make (self, offset)
+      return ProxySet._make (self, offset, psize)
     elif code == tpcode.DICT:
-      return ProxyDict._make (self, offset)
+      return ProxyDict._make (self, offset, psize)
     elif code == tpcode.BACKREF:
       self._assert_len (offset + sizeof (offset))
+      psize[0] += sizeof (offset) + 1
       memcpy (&offset, self.base + offset, sizeof (offset))
       return self._unpack (offset)
     elif code == tpcode.OTHER:
-      return _proxy_obj (self, offset)
+      return _proxy_obj (self, offset, psize)
     elif code == tpcode.CUSTOM:
       typ = _read_type (self, &offset)
       fn = _dispatch_type_impl (self.custom_packers, typ, direction.UNPACK)
       if fn is None:
-        raise TypeError ("cannot unpack type %r" % typ)
+        raise TypeError ("Found no unpacker for type %r" % typ)
+
+      psize[0] = offset + _get_padding (offset, sizeof (long long))
       return fn (typ, self,
                  offset + _get_padding (offset, sizeof (long long)))
     raise TypeError ("Cannot unpack typecode %r" % code)
 
   @cy.final
   cdef object _unpack (self, size_t offs):
+    cdef size_t dummy
     self._assert_len (offs)
-    return self._unpack_with_code (offs + 1, <unsigned char> (self.base[offs]))
+    return self._unpack_with_code (offs + 1, <unsigned char> (self.base[offs]),
+                                   &dummy)
 
   cpdef unpack (self):
     "Unpack an object at the proxy's current offset."
-    return self._unpack (self.offset)
+    cdef size_t off
+
+    off = self.offset
+    self._assert_len (off)
+    return self._unpack_with_code (off + 1, <unsigned char> (self.base[off]),
+                                   &self.offset)
 
   def unpack_from (self, off):
     "Unpack an object from the proxy at a specified offset."
@@ -1066,15 +1091,15 @@ cdef class ProxyList:
   cdef bint mutable
 
   @staticmethod
-  cdef ProxyList _make (Proxy proxy, size_t off, bint mutable):
+  cdef ProxyList _make (Proxy proxy, size_t off, bint mutable, size_t *psize):
     cdef ProxyList self
-    cdef size_t esz
+    cdef size_t esz, saved_off, total_size
     cdef unsigned int ty
     cdef bint rdwr
 
     self = ProxyList.__new__ (ProxyList)
     self.proxy = proxy
-    self.offset = off
+    self.offset = saved_off = off
 
     self.code = ty = self.proxy[self.offset]
     self.offset = _read_uleb128 (self.proxy, self.offset + 1, &self.size)
@@ -1083,22 +1108,42 @@ cdef class ProxyList:
       # Inline objects: Integers or floats.
       esz = _BASIC_SIZES[ty]
       self.offset += _get_padding (self.offset, esz)
+      total_size = self.size * esz
       self.proxy._assert_len (self.offset + self.size * esz)
+      psize[0] += self.offset + self.size * esz - saved_off
     else:
       # Indirect references to objects.
       self.proxy._assert_len (self.offset + sizeof (self.offset))
       memcpy (&self.offset, self.proxy.base + self.offset,
               sizeof (self.offset))
-      proxy._assert_len (self.offset + self.size *
-                         (sizeof (int) if self.code == b'I'
-                                       else sizeof (long long)))
+      total_size = self.size * (sizeof (int) if self.code == b'I'
+                                             else sizeof (long long))
 
     self.step = 1
     self.mutable = mutable and self.proxy.rdwr
+    self.proxy._assert_len (self.offset + total_size)
+    psize[0] += self.offset + total_size - saved_off + 1
     return self
 
   def __len__ (self):
     return self.size
+
+  @cy.final
+  cdef size_t _last_index_off (self, size_t base):
+    cdef void *ptr
+    cdef unsigned int code
+
+    if (not self.size or
+        (self.code != tpcode.INT32 and self.code != tpcode.INT64)):
+      return 0
+
+    ptr = self.proxy.base + self.offset
+    if self.code == tpcode.INT32:
+      ptr = (<int *>ptr) + self.size
+    else:
+      ptr = (<long long *>ptr) + self.size
+
+    return <char *>ptr - (<char *>self.proxy.base + base)
 
   @cy.final
   cdef void* _c_ptr (self, size_t idx, unsigned int *codep):
@@ -1142,6 +1187,7 @@ cdef class ProxyList:
   cdef inline object _c_index (self, Py_ssize_t pos):
     cdef void *p
     cdef unsigned int code
+    cdef size_t dummy
 
     if pos < 0:
       pos += self.size
@@ -1156,7 +1202,8 @@ cdef class ProxyList:
 
       return _builtin_read (p, code)
 
-    return self.proxy._unpack_with_code (<char *>p - self.proxy.base + 1, code)
+    return self.proxy._unpack_with_code (<char *>p - self.proxy.base + 1,
+                                         code, &dummy)
 
   @cy.cdivision (True)
   def __getitem__ (self, idx):
@@ -1427,15 +1474,16 @@ cdef class ProxyStr:
   cdef str uobj
 
   @staticmethod
-  cdef ProxyStr _make (Proxy proxy, size_t off):
+  cdef ProxyStr _make (Proxy proxy, size_t off, size_t *psize):
     cdef ProxyStr self
-    cdef size_t size
+    cdef size_t size, saved_off
     cdef unsigned int kind, orig_kind
 
     self = ProxyStr.__new__ (ProxyStr)
     self.proxy = proxy
 
     orig_kind = kind = self.proxy[off]
+    saved_off = off
     off = _read_uleb128 (proxy, off + 1, &size)
 
     if (kind & 1) == 0:
@@ -1448,6 +1496,7 @@ cdef class ProxyStr:
       _verify_str (self.proxy.base + off, size, orig_kind)
 
     self.uobj = STR_NEW (orig_kind, size, self.proxy.base + off)
+    psize[0] += off + size + kind - saved_off + 1
     return self
 
   def __dealloc__ (self):
@@ -1968,11 +2017,12 @@ cdef class ProxySet:
   cdef void* hashes
 
   @staticmethod
-  cdef ProxySet _make (Proxy proxy, size_t offset):
+  cdef ProxySet _make (Proxy proxy, size_t offset, size_t *psize):
     cdef ProxySet self
-    cdef size_t size, esz
+    cdef size_t size, esz, prev_off
     cdef unsigned char code
 
+    prev_off = offset
     self = ProxySet.__new__ (ProxySet)
     code = proxy[offset]
     if code == 1:
@@ -1989,6 +2039,7 @@ cdef class ProxySet:
       if size != self.indices.size:
         raise ValueError ('set and indices length mismatch')
 
+    psize[0] += self.indices._last_index_off (prev_off) + 1
     return self
 
   def __len__ (self):
@@ -2347,12 +2398,13 @@ cdef class ProxyDict:
   cdef bint wide
 
   @staticmethod
-  cdef ProxyDict _make (Proxy proxy, size_t offset):
+  cdef ProxyDict _make (Proxy proxy, size_t offset, size_t *psize):
     cdef ProxyDict self
-    cdef size_t size
+    cdef size_t size, prev_off
     cdef size_t kv_off[2]
     cdef unsigned char code
 
+    prev_off = offset
     self = ProxyDict.__new__ (ProxyDict)
     offset = _read_uleb128 (proxy, offset, &size)
     self.wide = proxy[offset] == 81   # equal to 'Q'
@@ -2367,6 +2419,7 @@ cdef class ProxyDict:
     proxy._assert_len (offset + self.tkeys.size *
                        (sizeof (long long) if self.wide else sizeof (int)))
 
+    psize[0] += self.tvalues._last_index_off (prev_off) + 1
     return self
 
   def __len__ (self):
@@ -2617,11 +2670,13 @@ cdef object _read_type (Proxy proxy, size_t *offp):
 
   return _fetch_type (path[:ix], path[ix + 1:])
 
-cdef object _proxy_obj (Proxy proxy, size_t off):
+cdef object _proxy_obj (Proxy proxy, size_t off, size_t *psize):
   cdef Py_ssize_t ix
+  cdef size_t prev_off
   cdef unsigned int code
   cdef void *ptr
 
+  prev_off = off
   typ: type = _read_type (proxy, &off)
   attrs: ProxyDict = proxy._unpack (off)
   values: ProxyList = attrs.tvalues
@@ -2637,6 +2692,7 @@ cdef object _proxy_obj (Proxy proxy, size_t off):
     descrs[str (attrs.tkeys._c_index (ix))] = val
 
   typ = type ("ProxyObject", (typ,), descrs)
+  psize[0] += values._last_index_off (prev_off)
   return typ.__new__ (typ)
 
 def _register_impl (typ, ix, fn):
