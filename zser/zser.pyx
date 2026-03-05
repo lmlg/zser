@@ -776,6 +776,7 @@ cdef class Proxy:
   cdef bint rdwr
   cdef bint verify_str
   cdef object import_key
+  cdef dict custom_cache
 
   def __init__ (self, mapping, offset = 0, size = None, rw = False,
                 hash_seed = 0, verify_str = False, import_key = None):
@@ -831,6 +832,7 @@ cdef class Proxy:
     self.base = <char *>&p0[0]
     self.custom_packers = _custom_packers.copy ()
     self.import_key = _get_import_key (import_key)
+    self.custom_cache = {}
 
   def __len__ (self):
     return self.max_size
@@ -866,10 +868,14 @@ cdef class Proxy:
     "Return the byte at position ``ix``."
     return self.mbuf[ix]
 
+  def getoff (self):
+    return self.offset
+
   cdef _unpack_with_code (self, size_t offset, unsigned int code,
                           size_t *psize):
     cdef size_t size, rel_off
     cdef unsigned int ilen
+    cdef object off_lookup, ret
 
     rel_off = offset
 
@@ -925,8 +931,14 @@ cdef class Proxy:
       psize[0] += sizeof (offset) + 1
       memcpy (&offset, self.base + offset, sizeof (offset))
       return self._unpack (offset)
-    elif code == tpcode.OTHER:
-      return _proxy_obj (self, offset, psize)
+
+    off_lookup = rel_off - 1
+    ret = self.custom_cache.get (off_lookup, _SENTINEL)
+    if ret is not _SENTINEL:
+      return ret
+
+    if code == tpcode.OTHER:
+      ret = _proxy_obj (self, offset, psize)
     elif code == tpcode.CUSTOM:
       typ = _read_type (self, &offset)
       fn = _dispatch_type_impl (self.custom_packers, typ, direction.UNPACK)
@@ -934,9 +946,17 @@ cdef class Proxy:
         raise TypeError ("Found no unpacker for type %r" % typ)
 
       psize[0] = offset + _get_padding (offset, sizeof (long long))
-      return fn (typ, self,
-                 offset + _get_padding (offset, sizeof (long long)))
-    raise TypeError ("Cannot unpack typecode %r" % code)
+      try:
+        ret = fn (typ, self, psize[0])
+        psize[0] += 1
+      finally:
+        if &self.offset != psize:
+          self.offset = rel_off - 1
+    else:
+      raise TypeError ("Cannot unpack typecode %r" % code)
+
+    self.custom_cache[off_lookup] = ret
+    return ret
 
   @cy.final
   cdef object _unpack (self, size_t offs):
@@ -2860,6 +2880,15 @@ def _unpack_function (cls, proxy, off):
                      (module, name))
   return ret
 
+def _pack_complex (packer, obj):
+  packer.pack (obj.real)
+  packer.pack (obj.imag)
+
+def _unpack_complex (cls, proxy, off):
+  real = proxy.unpack ()
+  imag = proxy.unpack ()
+  return cls (real, imag)
+
 _register_impl (types.ModuleType, direction.PACK, _pack_module)
 _register_impl (types.ModuleType, direction.UNPACK, _unpack_module)
 
@@ -2869,11 +2898,14 @@ _register_impl (types.FunctionType, direction.UNPACK, _unpack_function)
 _register_impl (types.BuiltinFunctionType, direction.PACK, _pack_function)
 _register_impl (types.BuiltinFunctionType, direction.UNPACK, _unpack_function)
 
+_register_impl (complex, direction.PACK, _pack_complex)
+_register_impl (complex, direction.UNPACK, _unpack_complex)
+
 # Exported typecodes.
 TYPE_INT8 = tpcode.INT8
 TYPE_INT16 = tpcode.INT16
-TYPE_INT32 = tpcode.INT8
-TYPE_INT64 = tpcode.INT16
+TYPE_INT32 = tpcode.INT32
+TYPE_INT64 = tpcode.INT64
 TYPE_FLOAT32 = tpcode.FLOAT32
 TYPE_FLOAT64 = tpcode.FLOAT64
 TYPE_BIGINT = tpcode.NUM
