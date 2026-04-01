@@ -1275,13 +1275,13 @@ cdef class ProxyList:
 
     if not self.mutable:
       raise TypeError ("cannot modify read-only proxy list")
-
-    if idx < 0:
+    elif idx < 0:
       idx += self.size
 
-    idx *= self.step
     if idx < 0 or idx >= <Py_ssize_t>self.size:
       raise IndexError ("index out of bounds")
+
+    idx *= self.step
 
     ret = self._c_ptr (idx, cdp)
     if not _is_inline_code (cdp[0]):
@@ -1492,6 +1492,7 @@ cdef object _verify_str (void *ptr, size_t size, unsigned int kind):
 cdef class ProxyStr:
   cdef Proxy proxy
   cdef str uobj
+  cdef unsigned int kind
 
   @staticmethod
   cdef ProxyStr _make (Proxy proxy, size_t off, size_t *psize):
@@ -1503,6 +1504,9 @@ cdef class ProxyStr:
     self.proxy = proxy
 
     orig_kind = kind = self.proxy[off]
+    if orig_kind < 1 or orig_kind > 4:
+      raise ValueError ("invalid string kind detected")
+
     saved_off = off
     off = _read_uleb128 (proxy, off + 1, &size)
 
@@ -1516,6 +1520,7 @@ cdef class ProxyStr:
       _verify_str (self.proxy.base + off, size, orig_kind)
 
     self.uobj = STR_NEW (orig_kind, size, self.proxy.base + off)
+    self.kind = kind
     psize[0] += off + size + kind - saved_off + 1
     return self
 
@@ -1538,15 +1543,11 @@ cdef class ProxyStr:
     meth = getattr (str, attr)
     def fn (*args, **kwargs):
       ret = meth (self.uobj, *args, **kwargs)
-      if type (ret) is list or type (ret) is tuple:
-        try:
-          ix = ret.index (self.uobj)
-          if type (ret) is list:
-            ret[ix] = str (self)
-          else:
-            ret = ret[0:ix] + (str (self), *ret[ix + 1:])
-        except ValueError:
-          pass
+      rtype = type (ret)
+
+      if rtype is list or rtype is tuple:
+        # Replace all occurrences of `self.uboj` by `str (self)`
+        ret = rtype (str (obj) if obj is self.uobj else obj for obj in ret)
       elif ret is self.uobj:
         ret = self
       return ret
@@ -1573,7 +1574,8 @@ cdef class ProxyStr:
     rv = ProxyStr.__new__ (ProxyStr)
     rv.proxy = self.proxy
     rv.uobj = STR_NEW (STR_KIND (self.uobj), min (end - start, slen),
-                       (<char *>PyUnicode_DATA (self.uobj)) + start)
+                       (<char *>PyUnicode_DATA (self.uobj)) +
+                       start * self.kind)
     return rv
 
   # These arithmetic operators are placeholders until we can install
@@ -1779,7 +1781,7 @@ cdef inline Py_ssize_t _cfloat_diff (cfloat x, cfloat y):
   if isinf (x):
     if isinf (y):
       # inf - inf
-      return 0 if x == y else -1 if x > y else 1
+      return 1 if x > y else -1
     else:
       # inf > nan; -inf < nan
       return x > 0
@@ -2579,6 +2581,9 @@ cdef class ProxyDict:
     mi = self._mut_vidx (key, &code)
     return _builtin_aadd (self.tvalues.proxy.base + mi, val, code)
 
+  def __or__ (self, other):
+    return self.copy().update (other)
+
 #####################################
 
 cdef class ProxyDescrBuiltin:
@@ -2742,7 +2747,7 @@ def register_unpack (typ):
 
 cdef object _dispatch_type_impl (dict packers, typ, unsigned int ix):
   cdef list flist, val
-  cdef size_t dist
+  cdef size_t dist, ndist
 
   flist = packers.get (typ)
   if flist:
@@ -2755,10 +2760,11 @@ cdef object _dispatch_type_impl (dict packers, typ, unsigned int ix):
 
   for key, val in _custom_packers.items ():
     try:
-      if key.__mro__.index (typ) < dist:
+      ndist = key.__mro__.index (typ)
+      if ndist < dist:
         fn = val[ix]
         if fn is not None:
-          dist = ix
+          dist = ndist
     except ValueError:
       pass
 
@@ -2824,7 +2830,7 @@ def pack_into (obj, place, offset = None, **kwargs):
     else:
       mv = memoryview (b)
       ioff = offset & (sizeof (long long) - 1)
-      bp[offset:len(mv) - offset] = mv[ioff:]
+      bp[offset:offset + len(mv) - ioff] = mv[ioff:]
     return len (b)
   else:
     raise TypeError ("don't know how to pack into object of type %r" %
@@ -2871,7 +2877,7 @@ def _pack_function (packer, obj):
 
 def _unpack_function (cls, proxy, off):
   rs = proxy.read_secret (off)
-  ix = rs.index ('.')
+  ix = rs.rindex ('.')
   module, name = rs[:ix], rs[ix + 1:]
   ret = getattr (Import_Module (module), name)
 
