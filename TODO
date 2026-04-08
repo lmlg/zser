@@ -1,1 +1,3 @@
 - Also allow None, True and False to be stored inline.
+- Use backreferences for (some) strings, bytes and bytearrays if, for example, a
+  size threshold is exceeded.

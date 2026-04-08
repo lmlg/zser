@@ -56,7 +56,7 @@ example, binary files _should_ be shareable between x86-64 and aarch64 systems.
 ## Classes
 
 ```python
-class Packer (offset = 0, id_cache = None, hash_seed = 0,
+class Packer (offset = 0, id_cache_size = 1024, hash_seed = 0,
               custom_packers = None, initial_size = 8, import_key = None)
 ```
 
@@ -65,8 +65,7 @@ class Packer (offset = 0, id_cache = None, hash_seed = 0,
   written into output objects. The constructor parameters are as following:
 
   * offset: The starting offset at which the objects will be serialized in the output.
-  * id_cache: A dictionary that maps objects id to offsets. Necessary to correctly serialize
-              cyclical objects.
+  * id_cache_size: Maximum size for the LRU cache that maps objects id to offsets.
   * hash_seed: An integer that is used to mix the hash values of the serialized objects
                when needed. This can be used in order to prevent malicious users from
                generating pathological cases with hand-crafted hash values.
@@ -140,7 +139,7 @@ class Packer (offset = 0, id_cache = None, hash_seed = 0,
 
 ```python
 class Proxy (mapping, offset = 0, size = None, rw = False,
-             hash_seed = 0, verify_str = False, import_key = None)
+             hash_seed = 0, verify_str = False, import_key = None, cache_size = 1024)
 ```
 
   Returns an object that manages a mapping so that objects can be deserialized out of it.
@@ -159,6 +158,8 @@ class Proxy (mapping, offset = 0, size = None, rw = False,
         **BufferError** will be raised.
   * hash_seed, import_key: See the **Packer** constructor for details.
   * verify_str: Whether to check for strings' consistency when unpacking them.
+  * cache_size: Maximum number of objecs that may be cached for fast unpacking. This
+                cache is only used for non-builtin objects.
   
   ```python
     __len__ ()
