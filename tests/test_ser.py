@@ -473,8 +473,11 @@ def unpack_obj (cls, handler, off):
 
 def test_register ():
   reg = Registered ("abc", -66.9)
-  q = zser.unpack_from (zser.pack (reg))
+  proxy = zser.Proxy (zser.pack (reg), 0)
+  q = proxy.unpack ()
   assert reg.f () == q.f ()
+  # Test that the LRU cache works
+  assert q is proxy.unpack_from (0)
 
 # Test poisoned inputs
 
@@ -589,3 +592,22 @@ def test_sequential_offsets ():
   px = zser.Proxy (p.as_bytearray ())
   for elem in elems:
     assert px.unpack () == elem
+
+def test_lru_cache ():
+  max_size = 10
+  cache = zser.LRUCache (max_size)
+  assert len (cache) == 0
+
+  for i in range (max_size + 2):
+    cache[i] = str (i)
+
+  assert (max_size - 1) in cache
+  assert 0 not in cache
+
+  cache = zser.LRUCache (2)
+  cache.add ('non-evictable', 1, True)
+  cache.add ('evictable', 2, False)
+  cache.add ('overflow', 3, False)
+
+  assert len (cache) == 2
+  assert 'non-evictable' in cache

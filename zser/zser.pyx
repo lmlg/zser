@@ -576,6 +576,165 @@ cdef object _get_import_key (object key):
 
   return key
 
+@cy.final
+cdef class _LRUNode:
+  cdef _LRUNode l_prev
+  cdef _LRUNode l_next
+  cdef object key
+  cdef object val
+  cdef bint tagged
+
+  @staticmethod
+  cdef _LRUNode _make_list ():
+    cdef _LRUNode ret
+
+    ret = _LRUNode.__new__ (_LRUNode)
+    ret.l_prev = ret.l_next = ret
+    ret.tagged = False
+    return ret
+
+  @staticmethod
+  cdef _LRUNode _make_node (key, val):
+    cdef _LRUNode ret
+
+    ret = _LRUNode.__new__ (_LRUNode)
+    ret.l_prev = ret.l_next = None
+    ret.key = key
+    ret.val = val
+    ret.tagged = False
+    return ret
+
+  cdef push_front (self, _LRUNode node):
+    self.l_next.l_prev = node
+    node.l_next = self.l_next
+
+    self.l_next = node
+    node.l_prev = self
+
+  cdef unlink (self):
+    self.l_prev.l_next = self.l_next
+    self.l_next.l_prev = self.l_prev
+
+  cdef _LRUNode pop_back (self):
+    cdef _LRUNode ret
+
+    ret = self.l_prev
+    if ret is self:
+      raise ValueError ("LRU cache is empty")
+
+    while ret is not self:
+      if not ret.tagged:
+        break
+
+      ret = ret.l_prev
+
+    if ret is self:
+      raise ValueError ("no entry can be evicted from LRU cache")
+
+    ret.unlink ()
+    return ret
+
+  def __hash__ (self):
+    return hash (self.key)
+
+  def __eq__ (self, other):
+    if isinstance (other, _LRUNode):
+      other = (<_LRUNode>other).key
+    return self.key == other
+
+cdef class LRUCache:
+  cdef _LRUNode nodes
+  cdef dict node_map
+  cdef Py_ssize_t max_size
+
+  def __init__ (self, max_size):
+    self.nodes = _LRUNode._make_list ()
+    self.node_map = {}
+    self.max_size = max_size
+    if self.max_size <= 0:
+      raise ValueError ("LRU size must be > 0")
+
+  cdef _LRUNode _get (self, object key, bint move):
+    cdef object tmp
+    cdef _LRUNode entry
+
+    tmp = self.node_map.get (key)
+    if tmp is None:
+      return None
+
+    entry = <_LRUNode>tmp
+    entry.unlink ()
+
+    if move:
+      self.nodes.push_front (entry)
+    return entry
+
+  cpdef _LRUNode get_entry (self, key):
+    return self._get (key, True)
+
+  cpdef get (self, key, dfl = None):
+    cdef _LRUNode ret
+
+    ret = self._get (key, True)
+    return ret.val if ret else dfl
+
+  cpdef _LRUNode add (self, key, val, bint tagged):
+    cdef _LRUNode entry
+
+    entry = self._get (key, True)
+    if entry:
+      entry.val = val
+      return
+    elif len (self.node_map) >= self.max_size:
+      entry = self.nodes.pop_back ()
+      del self.node_map[entry.key]
+      entry.key = key
+      entry.val = val
+    else:
+      entry = _LRUNode._make_node (key, val)
+
+    entry.tagged = tagged
+    self.node_map[key] = entry
+    self.nodes.push_front (entry)
+    return entry
+
+  def __setitem__ (self, key, val):
+    self.add (key, val, False)
+
+  cpdef pop (self, key, dfl = None):
+    cdef _LRUNode entry
+
+    entry = self._get (key, False)
+    return entry.val if entry else dfl
+
+  def __len__ (self):
+    return len (self.node_map)
+
+  def __bool__ (self):
+    return len (self) == 0
+
+  def __contains__ (self, key):
+    return key in self.node_map
+
+  def _it_impl (self, fn):
+    cdef _LRUNode node
+
+    node = self.nodes.l_next
+    while node is not self.nodes:
+      yield fn (node.key, node.val)
+
+  def __iter__ (self):
+    return self._it_impl (lambda k, _: k)
+
+  def keys (self):
+    return iter (self)
+
+  def values (self):
+    return self._it_impl (lambda _, v: v)
+
+  def items (self):
+    return self._it_impl (lambda k, v: (k, v))
+
 cdef class Packer:
   """
   Packs arbitrary objects into a byte stream.
@@ -588,22 +747,22 @@ cdef class Packer:
   cdef size_t offset
   cdef bytearray wbytes
   cdef size_t wlen
-  cdef dict id_cache
+  cdef LRUCache id_cache
   cdef size_t hash_seed
   cdef dict custom_packers
   cdef object import_key
   cdef char* ptr
 
-  def __init__ (self, offset = 0, id_cache = None, hash_seed = 0,
+  def __init__ (self, offset = 0, id_cache_size = 1024, hash_seed = 0,
                 custom_packers = None, initial_size = 8, import_key = None):
     """
     Constructs a Packer.
 
     :param int offset *(default 0)*: Starting offset at which objects are
       meant to be packed into.
-    
-    :param dict id_cache *(default None)*: Mapping from objects id to offsets.
-      Needed to correctly pack cyclic objects.
+
+    :param int id_cache_size *(default 1024)*: Maximum size for the LRU cache
+      that temporarily stores recursive objects when packing.
 
     :param int hash_seed *(default 0)*: Initial value used to hash objects.
 
@@ -617,7 +776,7 @@ cdef class Packer:
     """
     self.offset = offset & (sizeof (long long) - 1)
     self.wbytes = bytearray (_upsize (initial_size + offset))
-    self.id_cache = id_cache if id_cache is not None else {}
+    self.id_cache = LRUCache (id_cache_size)
     self.hash_seed = hash_seed
     self.custom_packers = _custom_packers.copy ()
     if custom_packers is not None:
@@ -699,18 +858,19 @@ cdef class Packer:
     """
     cdef type ty
     cdef size_t prev
+    cdef _LRUNode off_entry
 
     prev = self.offset
     obj_id = id (obj)
-    off = self.id_cache.get (obj_id)
-    if off is not None:
+    off_entry = self.id_cache.get_entry (obj_id)
+    if off_entry is not None:
       self.putb (tpcode.BACKREF)
-      self.pack_struct ("N", off)
+      self.pack_struct ("N", off_entry.val)
       return self.offset - prev
 
     ty = type (obj)
     if ty not in (int, float, str, bytes, bytearray):
-      self.id_cache[obj_id] = prev
+      off_entry = self.id_cache.add (obj_id, prev, True)
 
     try:
       fn = _BASIC_PACKERS.get (ty, None)
@@ -732,6 +892,7 @@ cdef class Packer:
       else:
         _pack_generic (self, obj)
 
+      off_entry.tagged = False
       return self.offset - prev
     except Exception:
       self.id_cache.pop (obj_id, None)
@@ -776,10 +937,11 @@ cdef class Proxy:
   cdef bint rdwr
   cdef bint verify_str
   cdef object import_key
-  cdef dict custom_cache
+  cdef LRUCache custom_cache
 
   def __init__ (self, mapping, offset = 0, size = None, rw = False,
-                hash_seed = 0, verify_str = False, import_key = None):
+                hash_seed = 0, verify_str = False, import_key = None,
+                cache_size = 1024):
     """
     Constructs a Proxy.
 
@@ -803,6 +965,10 @@ cdef class Proxy:
       consistency (unicode-wise) when unpacking them.
 
     :param import_key *(default None)*: See ``Packer.__init__``.
+
+    :param int cache_size *(default 1024)*: Maximum number of objects that
+      may be cached for fast unpacking. This cache is only used for 'complex'
+      objects only.
     """
     cdef const unsigned char[:] p0
 
@@ -832,7 +998,7 @@ cdef class Proxy:
     self.base = <char *>&p0[0]
     self.custom_packers = _custom_packers.copy ()
     self.import_key = _get_import_key (import_key)
-    self.custom_cache = {}
+    self.custom_cache = LRUCache (cache_size)
 
   def __len__ (self):
     return self.max_size
@@ -955,7 +1121,7 @@ cdef class Proxy:
     else:
       raise TypeError ("Cannot unpack typecode %r" % code)
 
-    self.custom_cache[off_lookup] = ret
+    self.custom_cache.add (off_lookup, ret, False)
     return ret
 
   @cy.final
