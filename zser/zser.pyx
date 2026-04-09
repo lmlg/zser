@@ -584,6 +584,7 @@ cdef class _LRUNode:
   cdef object val
   cdef bint tagged
 
+  @cy.final
   @staticmethod
   cdef _LRUNode _make_list ():
     cdef _LRUNode ret
@@ -593,6 +594,7 @@ cdef class _LRUNode:
     ret.tagged = False
     return ret
 
+  @cy.final
   @staticmethod
   cdef _LRUNode _make_node (key, val):
     cdef _LRUNode ret
@@ -604,6 +606,7 @@ cdef class _LRUNode:
     ret.tagged = False
     return ret
 
+  @cy.final
   cdef push_front (self, _LRUNode node):
     self.l_next.l_prev = node
     node.l_next = self.l_next
@@ -611,10 +614,12 @@ cdef class _LRUNode:
     self.l_next = node
     node.l_prev = self
 
+  @cy.final
   cdef unlink (self):
     self.l_prev.l_next = self.l_next
     self.l_next.l_prev = self.l_prev
 
+  @cy.final
   cdef _LRUNode pop_back (self):
     cdef _LRUNode ret
 
@@ -669,7 +674,8 @@ cdef class LRUCache:
       self.nodes.push_front (entry)
     return entry
 
-  cpdef _LRUNode get_entry (self, key):
+  @cy.final
+  cdef _LRUNode get_entry (self, key):
     return self._get (key, True)
 
   cpdef get (self, key, dfl = None):
