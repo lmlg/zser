@@ -1,3 +1,4 @@
+import cython
 import glob
 import os
 import shutil
@@ -11,7 +12,6 @@ extension_modules = [
 ]
 
 include_dirs = os.environ.get("CYTHON_INCLUDE_DIRS", ".").split (":")
-
 base_path = os.path.dirname (__file__)
 
 with open (os.path.join (base_path, "VERSION")) as version:
@@ -21,13 +21,21 @@ with open (os.path.join (base_path, "zser/_version.py"), "w") as vfile:
 with open (os.path.join (base_path, "requirements.txt")) as reqs:
   requirements = reqs.read ()
 
-class CustomBuild(build_ext):
-  def run(self):
-    super().run()
-    suffix = '.dll' if 'win' in sys.platform.lower() else '.so'
-    files = glob.glob('build/*/zser/*' + suffix)
+with (open (os.path.join (base_path, 'zser/zser.pyx'), 'w') as out,
+      open (os.path.join (base_path, 'zser/_zser.pyx')) as file_in):
+  text = file_in.read ()
+  if cython.__version__[0] < '3':
+    # Older cython doesn't support the noexcept function attribute.
+    text = text.replace (' noexcept', '')
+  out.write (text)
+
+class CustomBuild (build_ext):
+  def run (self):
+    super().run ()
+    suffix = '.dll' if 'win' in sys.platform.lower () else '.so'
+    files = glob.glob ('build/*/zser/*' + suffix)
     if files:
-      shutil.copy(files[0], 'zser/zser' + suffix)
+      shutil.copy (files[0], 'zser/zser' + suffix)
 
 setup (
   name = "zser",

@@ -137,3 +137,4 @@ dmypy.json
 # zser specific files
 zser/*.html
 zser/_version.py
+zser/zser.pyx

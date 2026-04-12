@@ -1,3 +1,8 @@
 - Also allow None, True and False to be stored inline.
 - Use backreferences for (some) strings, bytes and bytearrays if, for example, a
   size threshold is exceeded.
+- Allow builds out of tree
+- Use python's typing to further refine specific types. For example:
+  `typing.List[zser.i32]` should just work as expected.
+- Add another typecode, 'META', to specify a header-like field where we can
+  set metadata for the blob.
