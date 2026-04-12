@@ -21,13 +21,13 @@ with open (os.path.join (base_path, "zser/_version.py"), "w") as vfile:
 with open (os.path.join (base_path, "requirements.txt")) as reqs:
   requirements = reqs.read ()
 
-class CustomBuild(build_ext):
-  def run(self):
-    super().run()
-    suffix = '.dll' if 'win' in sys.platform.lower() else '.so'
-    files = glob.glob('build/*/zser/*' + suffix)
+class CustomBuild (build_ext):
+  def run (self):
+    super().run ()
+    suffix = '.dll' if 'win' in sys.platform.lower () else '.so'
+    files = glob.glob ('build/*/zser/*' + suffix)
     if files:
-      shutil.copy(files[0], 'zser/zser' + suffix)
+      shutil.copy (files[0], 'zser/zser' + suffix)
 
 setup (
   name = "zser",
